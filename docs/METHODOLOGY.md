@@ -61,3 +61,34 @@ Approved departures from CLAUDE.md, with reasons (§0, rule 7).
 9. **Two small wording choices (§11.3).**
    - `rf_source` reads "13-week T-bill (^IRX)" or "constant 3.00% a year".
    - A ticker-source Monte Carlo run returns no data-cleaning warnings, because `MonteCarloResponse` has no warnings field.
+
+### Phase 3 (approved 2026-10-16)
+1. **A Run sends the backtest first, then the other two requests (§13).** The Run button is the only thing that sends requests. It posts `/api/backtest`, and only if that succeeds does it post `/api/sensitivity` and `/api/monte-carlo`, in parallel.
+   - Three simultaneous requests on a cold cache would each download the same tickers from Yahoo. §4.2 makes that safe, but it triples the downloads and the rate-limit risk.
+   - A request the backtest rejects would fail the same way at the other two endpoints, so they are skipped, and their panels say so.
+   - A new Run aborts any request still in flight, so a slow old response can't overwrite a newer one.
+2. **The dashboard's Monte Carlo projects the strategy over the full evaluation window (§13).** The sidebar has only the §13 settings (paths, horizon, block length, seed, zero drift), so requests use `source: "strategy"` with the default `window: "full"`. The KPI grid shows VaR and CVaR next to the strategy's metrics, so the projection has to be of the strategy. `source: "ticker"` and `window: "is"` remain available through the API.
+3. **Two API options have no control (§13).** The sensitivity grid overrides (`L_values`, `z_entry_values`) and `initial_capital` are not in the §13 sidebar list, so the dashboard never sends them: the default grid (§9) and $100,000 apply. Both remain available through the API.
+4. **The KPI grid shows a few more figures (§13, view 1, addition).**
+   - Besides the listed metrics: total return, annualized vol, average holding days, cost drag, and correlation with SPY.
+   - The pairs diagnostics also show the static β̂ and α̂.
+   - "VaR95 and CVaR95 from the latest Monte Carlo run" are shown for both models, GBM and bootstrap.
+5. **The vol forecast has its own chart (§13, view 3).** It sits under the gross-exposure chart, with the target as a dashed line, and the exposure chart marks the leverage cap. A second y-axis on the exposure chart would narrow its plot area, and the synchronized charts would no longer line up date for date.
+6. **The sidebar checks only that inputs are well formed (§13).**
+   - A blank or non-numeric field stops the Run with a message naming the field. `JSON.stringify(NaN)` is `null`, and a null `L` would silently mean "use the default".
+   - The seed must be a whole number below 2^53: a larger integer is rounded before it leaves the browser (§10.6).
+   - Every range rule is left to the API, whose 422 `detail` names the rule, so the rules live in one place.
+7. **Two marker edge cases in the signal panel (§13, view 3).**
+   - An exit forced by a NaN score (a degenerate window means flat) has no score to sit on, so its marker is drawn at 0.
+   - A marker whose signal date is not in the series is counted and reported under the chart instead of being dropped. The s0 rule (§11.3) means this never happens.
+8. **Each view has its own error boundary (addition).** A rendering error in one panel shows an error box in that panel instead of blanking the dashboard. The boundaries reset on every new run.
+9. **The production build puts the libraries in their own chunks (`vite.config.ts`, addition).** The single bundle was 657 kB, over Vite's 500 kB advisory limit, so every `npm run build` printed a warning. Rolldown's `codeSplitting` now puts React (219 kB) and Recharts with its dependencies (387 kB) in separate chunks next to the 50 kB app, rather than the limit being raised.
+10. **Screenshots are in `docs/screenshots/` (§16).** There are 11 PNGs (1.5 MB) of the dashboard running against the local API:
+    - KO/PEP pairs, 2015–2025;
+    - SPY trend, 2006–2025, with a 10% vol target;
+    - an unknown ticker (404);
+    - a trend history too short for the sensitivity grid (422).
+
+    They were captured by driving headless Edge over the Chrome DevTools Protocol. That script is not in the repo.
+
+As Phase 0, item 3 planned, `npm test` is now plain `vitest run`.

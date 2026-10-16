@@ -11,6 +11,20 @@ export default defineConfig({
     // VITE_API_URL defaults to same origin; in dev, /api is forwarded to uvicorn (§13).
     proxy: { '/api': 'http://localhost:8000' },
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        // Libraries in their own chunks: each stays under Vite's 500 kB advisory limit, and they
+        // stay cached in the browser across app rebuilds.
+        codeSplitting: {
+          groups: [
+            { name: 'react', test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/, priority: 2 },
+            { name: 'charts', test: /node_modules[\\/]/, priority: 1 },
+          ],
+        },
+      },
+    },
+  },
   test: {
     include: ['src/**/*.test.ts'],
   },

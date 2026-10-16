@@ -2,7 +2,7 @@
 
 A backtesting and Monte Carlo risk engine for daily US equity strategies: mean reversion, pairs trading and time-series momentum, with an optional volatility-targeting overlay. The specification is [CLAUDE.md](CLAUDE.md).
 
-> Work in progress: the backend (price cache, engine and API) is done through Phase 2; the dashboard arrives in Phase 3. The full README (screenshots, benchmarks) comes in Phase 4.
+> Work in progress: the backend (price cache, engine and API) and the dashboard are done through Phase 3; dashboard screenshots are in [docs/screenshots](docs/screenshots). The full README (screenshots, benchmarks) comes in Phase 4.
 
 ## Setup (PowerShell)
 
