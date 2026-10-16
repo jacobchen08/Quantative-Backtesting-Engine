@@ -1,0 +1,14 @@
+# Tool configuration only (ruff + pytest). Dependencies live in requirements*.txt.
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# NPY catches the legacy np.random global API, which §2.4 forbids.
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
