@@ -1,4 +1,148 @@
-"""to_jsonable(): the single NaN/inf/numpy/date conversion at the API boundary (§2.4).
+"""to_jsonable() and the response payloads built from engine results (§2.4, §11.3).
 
-Implemented in Phase 2.
+Starlette answers HTTP 500 if a response contains NaN or inf, so every payload goes through
+to_jsonable(): non-finite floats become None, numpy values become Python values, and dates
+become "YYYY-MM-DD".
 """
+
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import math
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from app.services.monte_carlo import ModelResult, MonteCarloResult
+from app.services.pipeline import BacktestReport, SensitivityResult
+
+
+def to_jsonable(obj: Any) -> Any:
+    """Convert engine output to JSON-safe Python: None for NaN/inf/NaT, plain numbers, ISO dates."""
+    if obj is None or isinstance(obj, (bool, str)):
+        return obj
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, (int, np.integer)):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        value = float(obj)
+        return value if math.isfinite(value) else None
+    if obj is pd.NaT or (isinstance(obj, np.datetime64) and np.isnat(obj)):
+        return None
+    if isinstance(obj, (dt.date, np.datetime64)):  # dt.datetime and pd.Timestamp are dt.date subclasses
+        return pd.Timestamp(obj).strftime("%Y-%m-%d")
+    if isinstance(obj, dict):
+        return {str(key): to_jsonable(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_jsonable(value) for value in obj]
+    if isinstance(obj, (pd.Series, pd.Index)):
+        return to_jsonable(obj.to_numpy())
+    if isinstance(obj, np.ndarray):
+        if obj.dtype.kind == "M":
+            return [None if pd.isna(day) else day.strftime("%Y-%m-%d") for day in pd.DatetimeIndex(obj)]
+        if obj.dtype.kind == "f":
+            return _finite(obj.tolist())
+        return to_jsonable(obj.tolist())
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {field.name: to_jsonable(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
+    raise TypeError(f"cannot convert {type(obj).__name__} to JSON")
+
+
+def _finite(values: Any) -> Any:
+    """Float lists from ndarray.tolist(), with NaN and inf replaced by None (any nesting)."""
+    if isinstance(values, list):
+        return [_finite(value) for value in values]
+    return values if math.isfinite(values) else None
+
+
+def backtest_payload(
+    report: BacktestReport, resolved: dict[str, Any], data_warnings: list[str]
+) -> dict[str, Any]:
+    """BacktestResponse without run_id and engine_version (§11.3)."""
+    s = report.series
+    d = report.diagnostics
+    series = {
+        "dates": s.index,
+        **{name: s[name] for name in ("equity", "benchmark_equity", "drawdown", "daily_return")},
+        **{name: s[name] for name in ("position", "gross_exposure", "score")},
+        **{name: s[name] if name in s else None for name in ("beta", "beta_used", "vol_forecast")},
+        "is_oos": s["is_oos"],
+    }
+    diagnostics = None
+    if d is not None:
+        diagnostics = {
+            "coint_p_is": d.coint_p_is,
+            "coint_p_oos": d.coint_p_oos,
+            "half_life_is": d.half_life_is,
+            "static_beta_is": d.static_beta_is,
+            "static_alpha_is": d.static_alpha_is,
+        }
+    return to_jsonable(
+        {
+            "resolved": {
+                **resolved,
+                "split_date": report.split_date,
+                "first_evaluated_date": report.first_evaluated_date,
+            },
+            "series": series,
+            "sizing": report.sizing,
+            "trades": report.trades.to_dict("records"),
+            "metrics": report.metrics,
+            "benchmark_metrics": report.benchmark_metrics,
+            "diagnostics": diagnostics,
+            "ruined": report.ruined,
+            "ruin_date": report.ruin_date,
+            "warnings": [*data_warnings, *report.warnings],
+        }
+    )
+
+
+def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
+    """SensitivityResponse (§11.3). window.end is the split date, which the window excludes."""
+    selected = None if result.selected is None else {"L": result.selected[0], "z_entry": result.selected[1]}
+    return to_jsonable(
+        {
+            "L_values": result.L_values,
+            "z_entry_values": result.z_entry_values,
+            "sharpe": result.sharpe,
+            "n_configs_tested": result.n_configs_tested,
+            "window": {"start": result.window_start, "end": result.window_end},
+            "selected": selected,
+        }
+    )
+
+
+def _model_payload(model: ModelResult) -> dict[str, Any]:
+    return {
+        "bands": model.bands,
+        "sample_paths": model.sample_paths,
+        "hist_counts": model.hist_counts,
+        "var95": model.var95,
+        "var99": model.var99,
+        "cvar95": model.cvar95,
+        "cvar99": model.cvar99,
+        "elapsed_ms": model.elapsed_ms,
+    }
+
+
+def monte_carlo_payload(result: MonteCarloResult, resolved: dict[str, Any]) -> dict[str, Any]:
+    """MonteCarloResponse (§11.3). The raw terminal returns stay server-side."""
+    return to_jsonable(
+        {
+            "resolved": {
+                **resolved,
+                "seed": result.seed,
+                "n_hist": result.n_hist,
+                "mu_daily": result.mu_daily,
+                "sigma_daily": result.sigma_daily,
+            },
+            "gbm": _model_payload(result.gbm),
+            "bootstrap": _model_payload(result.bootstrap),
+            "closed_form_gbm": result.closed_form_gbm,
+            "hist_edges": result.hist_edges,
+            "elapsed_ms_total": result.elapsed_ms_total,
+        }
+    )

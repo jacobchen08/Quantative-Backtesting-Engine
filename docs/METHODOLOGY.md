@@ -35,3 +35,29 @@ Approved departures from CLAUDE.md, with reasons (§0, rule 7).
 9. **The Pydantic part of that test waits for Phase 2.** "The full response still validates against the Pydantic response model" needs `schemas.py`, which Phase 2 adds; the assertion is added then.
 10. **pytest treats every warning as an error (`pyproject.toml`, addition).** The config sets `filterwarnings = ["error"]`, so any warning fails the test that raised it, locally and in CI. In numerical code a `RuntimeWarning` usually signals a silent NaN or inf.
 11. **The Phase 1 `conftest.py` has synthetic data only (§12).** It provides the 1,000-day market (a cointegrated Y/X pair and SPY, from a fixed seed) and rf from a constant 2% ^IRX. The fake network, the frozen clock, the yfinance-layout frames and the temp-file database need the loader and the API, so they arrive in Phase 2.
+
+### Phase 2 (approved 2026-10-16)
+1. **Yahoo errors are read from yfinance's log (§4.3).** In yfinance 1.7, `yf.download` never raises. It catches every failure, logs it on the `yfinance` logger as `['TICKER']: <error>`, and returns an empty frame. (Verified with a stubbed `Ticker` driving the real `yf.download`.)
+   - `fetch_from_yahoo` keeps the spec's exact call, collects that log line for its own ticker, and re-raises.
+     - A rate limit becomes `YFRateLimitError` (503).
+     - Any other exception, including a timeout, becomes `DownloadError` (502).
+   - An unknown or delisted ticker is logged as a plain "possibly delisted" message, not an exception, so it stays an empty frame (404). A real request for an unknown ticker confirmed this.
+
+   CLAUDE.md §4.3 now says so.
+2. **Cleaning is split between storage and read time (§4.4).**
+   - Before rows are stored, those missing `close` or `adj_close` are dropped and duplicate dates are removed. Those columns are NOT NULL, and (ticker, date) is the key.
+   - Every time prices are read, the other checks run:
+     - non-positive prices are dropped with a warning;
+     - days above 50% and runs of 5 or more identical closes produce warnings;
+     - out-of-range ^IRX prints are dropped.
+
+   So the warnings appear on cache hits too, not only on the request that downloaded the data.
+3. **`open`, `high` and `low` are nullable (§4.1).** The spec lists them as Float without saying NOT NULL. Yahoo occasionally has a valid close with a missing open, high or low, and the engine uses only `close` and `adj_close`.
+4. **A failed or empty download stores nothing (§4.2).** An empty answer raises 404 before anything is written, so neither the rows nor the coverage change. Otherwise one transient empty answer from Yahoo would be recorded as coverage and never refetched.
+5. **Validation errors are one string (§11.1).** FastAPI's default 422 body is a list of error objects. The API returns `{"detail": "field: message; …"}` instead, the same `{"detail": "..."}` shape as every other error, so the frontend handles one format.
+6. **Request bodies are strict (§11.2, addition).** Unknown fields return 422, which catches typos such as `z_entri`. NaN or Infinity in a request body is rejected (`allow_inf_nan=False`).
+7. **Fields that don't apply are dropped before validation (§11.2).** A "before" validator removes them from the input, so none of their rules run. Even a nonsense value, such as `z_entry: 99` for trend, is accepted and then echoed as `null` in `resolved`.
+8. **Only successful backtests are stored (§4.1).** `backtest_runs` gets a row when `/api/backtest` returns 200. A failed request has no metrics to store.
+9. **Two small wording choices (§11.3).**
+   - `rf_source` reads "13-week T-bill (^IRX)" or "constant 3.00% a year".
+   - A ticker-source Monte Carlo run returns no data-cleaning warnings, because `MonteCarloResponse` has no warnings field.

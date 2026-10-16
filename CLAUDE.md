@@ -63,7 +63,7 @@ A local, single-user research tool that:
 ### 2.4 Numerical and serialization rules
 - **Same-row tolerances only.** Guards for degenerate statistics use values from the same date. A threshold built from a full-series statistic (such as a median of the whole series) is look-ahead and will fail the perturbation test.
 - **Undefined means null.** A statistic with a near-zero denominator, no trades or no exposure is `None`/`null`. It is never `NaN`, `inf` or a huge finite number. The standard deviation of a constant series is often not exactly 0: rounding leaves a tiny value that depends on the constant, and numpy's `np.std` and pandas' `Series.std` behave alike. For 252 copies of 0.1 both return 1.4e-17, which would give a naive Sharpe ratio of about 7e15; for 252 copies of 0.3 both return exactly 0 (verified with numpy 2.5 and pandas 3.0). The threshold rules must produce `null` either way. Each statistic's threshold is given where it is defined.
-- **JSON.** Starlette answers with HTTP 500 if a response contains `NaN` or `inf` (verified). Convert at the API boundary with one helper, `to_jsonable()`. It maps non-finite floats to `None`, numpy arrays and scalars to Python types, and dates to `"YYYY-MM-DD"`.
+- **JSON.** A plain `JSONResponse` containing `NaN` or `inf` makes Starlette answer HTTP 500 (verified). Routes with a Pydantic `response_model` behave differently. FastAPI serializes them through Pydantic, which writes NaN and inf as `null` without complaint, even in a field typed as non-nullable (verified with FastAPI 0.143 and Pydantic 2.14). So convert at the API boundary with one helper, `to_jsonable()`, *before* the response model validates. It maps non-finite floats to `None`, numpy arrays and scalars to Python types, and dates to `"YYYY-MM-DD"`. A NaN in a nullable field then becomes `null` as intended. A NaN in a non-nullable field fails validation (HTTP 500) instead of silently becoming `null`.
 - **pandas 3 Copy-on-Write.** Never use chained assignment (`df["a"][mask] = v`); use `.loc` or direct Series assignment.
 - **RNG.** Always use `np.random.default_rng(seed)`. Never use `np.random.seed` or the legacy global functions.
 
@@ -158,6 +158,12 @@ quant-engine/
   | Empty frame. yfinance returns an empty frame for unknown tickers instead of raising (verified). | 404 `"No data for {ticker} between {start} and {end}"` |
   | `yfinance.exceptions.YFRateLimitError` | 503 |
   | Any other download exception, or a timeout | 502 |
+
+  `yf.download` never raises in yfinance 1.7 (verified). It catches every failure, logs it on the `yfinance` logger as `['TICKER']: <error>`, and returns an empty frame. So `fetch_from_yahoo` reads that log line for its own ticker and re-raises:
+  - `YFRateLimitError` for a rate limit;
+  - a download error for any other exception, whose log text is the exception's repr, e.g. `ConnectionError('…')`.
+
+  An unknown or delisted ticker logs a plain message such as `possibly delisted; no timezone found`, not an exception, so it stays an empty frame (404).
 
 ### 4.4 Cleaning (tradable tickers)
 - Drop rows with a missing `close` or `adj_close`, de-duplicate dates (keep the last), and sort.
