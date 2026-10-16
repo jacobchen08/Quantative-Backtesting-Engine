@@ -62,7 +62,7 @@ A local, single-user research tool that:
 
 ### 2.4 Numerical and serialization rules
 - **Same-row tolerances only.** Guards for degenerate statistics use values from the same date. A threshold built from a full-series statistic (such as a median of the whole series) is look-ahead and will fail the perturbation test.
-- **Undefined means null.** A statistic with a near-zero denominator, no trades or no exposure is `None`/`null`. It is never `NaN`, `inf` or a huge finite number. The standard deviation of a constant series depends on the implementation: numpy's `np.std` returns about 6e-17 rather than 0 (measured), which would give a naive Sharpe ratio of about 1e12, while pandas' `Series.std` returns exactly 0. The threshold rules must produce `null` either way. Each statistic's threshold is given where it is defined.
+- **Undefined means null.** A statistic with a near-zero denominator, no trades or no exposure is `None`/`null`. It is never `NaN`, `inf` or a huge finite number. The standard deviation of a constant series is often not exactly 0: rounding leaves a tiny value that depends on the constant, and numpy's `np.std` and pandas' `Series.std` behave alike. For 252 copies of 0.1 both return 1.4e-17, which would give a naive Sharpe ratio of about 7e15; for 252 copies of 0.3 both return exactly 0 (verified with numpy 2.5 and pandas 3.0). The threshold rules must produce `null` either way. Each statistic's threshold is given where it is defined.
 - **JSON.** Starlette answers with HTTP 500 if a response contains `NaN` or `inf` (verified). Convert at the API boundary with one helper, `to_jsonable()`. It maps non-finite floats to `None`, numpy arrays and scalars to Python types, and dates to `"YYYY-MM-DD"`.
 - **pandas 3 Copy-on-Write.** Never use chained assignment (`df["a"][mask] = v`); use `.loc` or direct Series assignment.
 - **RNG.** Always use `np.random.default_rng(seed)`. Never use `np.random.seed` or the legacy global functions.
@@ -834,7 +834,7 @@ type MonteCarloResponse = {
    - `ruined` is set;
    - if r falls in IS, OOS metrics are `null`.
    - A 2×-levered long hit by a −50% day must trigger it.
-   - **One-day segment.** Ruin on the first evaluated day leaves an IS segment with `n_days = 1`. Its `ann_vol`, `sharpe`, `sortino`, `beta_spy` and `corr_spy` are `null`, and the full response still validates against the Pydantic response model. A non-nullable float rejects `None` with a ValidationError (verified).
+   - **One-day segment.** Ruin on the split date (the first OOS day) leaves an OOS segment with `n_days = 1`. Its `ann_vol`, `sharpe`, `sortino`, `beta_spy` and `corr_spy` are `null`, and the full response still validates against the Pydantic response model. A non-nullable float rejects `None` with a ValidationError (verified). Ruin can't happen on the first evaluated day itself: no position is held into that day (the first position is entered at its close), so its total return is rf minus at most the entry cost.
 10. **`pct_days_at_cap`:**
     - it equals the share of invested days whose held gross exposure is ≥ `max_leverage` × (1 − 1e-9);
     - it agrees with the `scale_used.shift(k + 1) ≥ max_leverage` formulation for k ∈ {0, 1, 2};
@@ -856,7 +856,7 @@ These test `pipeline.run_sensitivity` directly.
   - CAGR on a known path;
   - `sharpe_ci95` on a known input.
 - **Null rules:**
-  - a constant series gives a `null` Sharpe, not about 1e12. Test it with both a numpy array (std ≈ 6e-17) and a pandas Series (std = 0);
+  - a constant series gives a `null` Sharpe, not a huge finite number. Test it with a numpy array whose std is tiny but non-zero (252 copies of 1/3: about 6e-17) and with a pandas Series whose std is exactly 0 (252 copies of 0.3);
   - no downside days gives a `null` Sortino;
   - no trades gives a `null` win rate.
 

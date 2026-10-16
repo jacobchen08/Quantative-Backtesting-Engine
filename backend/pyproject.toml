@@ -12,3 +12,5 @@ select = ["E", "F", "W", "I", "B", "UP", "NPY"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
+# Any warning fails a test: a RuntimeWarning in numerical code usually means a silent NaN or inf.
+filterwarnings = ["error"]
