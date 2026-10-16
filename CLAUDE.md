@@ -6,6 +6,8 @@ Spec reviewed on 2026-10-15 against numpy 2.5, pandas 3.0, scipy 1.18, statsmode
 - **(verified)** = library or data behaviour observed directly.
 - **(measured)** = a number from a reference prototype run during that review. These numbers come from the prototype, not the final code, so never quote them as results.
 
+The material for Phases 5–9 (added 2026-10-16: §5.7–5.9, §8.1–8.2, §9.1–9.2, §10.7–10.8, §11.4 and the matching parts of §6, §7, §11–16) has **not** been checked against the libraries or a prototype yet, so it carries neither label. Each of those phases starts by checking the library behaviour its sections rely on, and reports anything that doesn't hold before writing code (§0, rule 2).
+
 ## 0. Rules for the Agent (read first)
 1. **This file is the source of truth.** Implement formulas, snippets, thresholds and tolerances exactly as written. Do not substitute a "standard" version from memory or silently "improve" anything. If you believe something here is wrong, explain why and wait for approval.
 2. **Ask instead of guessing.** If anything is ambiguous, contradictory, or doesn't work with the installed library versions, stop and ask.
@@ -19,13 +21,14 @@ Spec reviewed on 2026-10-15 against numpy 2.5, pandas 3.0, scipy 1.18, statsmode
 
 ## 1. Scope
 A local, single-user research tool that:
-- backtests three daily strategies on US-listed stocks and ETFs: **single-asset mean reversion**, **pairs trading** (statistical arbitrage) and **time-series momentum** (trend following);
-- can size any of them with an optional **volatility-targeting overlay**;
-- reports **in-sample (IS) and out-of-sample (OOS)** performance with explicit, conservative accounting: an execution lag, per-leg costs, and financing at the T-bill rate;
-- projects forward risk with **Monte Carlo** (GBM and block bootstrap), checked against closed-form results;
-- shows everything in a React dashboard.
+- backtests four daily strategies on US-listed stocks and ETFs: **single-asset mean reversion**, **pairs trading** (statistical arbitrage, with a rolling-OLS or Kalman-filter hedge ratio), **time-series momentum** (trend following) on one asset, and a **multi-asset trend portfolio**;
+- can size any of them with an optional **volatility-targeting overlay** (the trend portfolio is always vol-scaled per asset);
+- reports **in-sample (IS) and out-of-sample (OOS)** performance with explicit, conservative accounting: an execution lag, per-leg costs, optional borrow fees and a long-only switch, and financing at the T-bill rate;
+- tests robustness: a **cost sweep with the break-even cost**, a parameter grid with a **deflated Sharpe ratio**, and **walk-forward** re-optimization;
+- projects forward risk with **Monte Carlo** (GBM, moving-block bootstrap and stationary bootstrap), checked against closed-form results;
+- shows everything in a React dashboard, with run history, and as a static, read-only demo of recorded results.
 
-**Stack:** Python (FastAPI, NumPy, pandas, SciPy, statsmodels, SQLAlchemy, yfinance); SQLite by default with optional PostgreSQL; React + TypeScript (Vite, Tailwind CSS v4, Recharts).
+**Stack:** Python (FastAPI, NumPy, pandas, SciPy, statsmodels, SQLAlchemy, yfinance; `arch` from Phase 7, §10.8); SQLite by default with optional PostgreSQL; React + TypeScript (Vite, Tailwind CSS v4, Recharts; Playwright for browser tests from Phase 8).
 
 **Non-goals (do not build):**
 - authentication or multiple users;
@@ -34,7 +37,7 @@ A local, single-user research tool that:
 - live or paper trading;
 - schema migrations (tables are created at startup);
 - stop-losses, position sizing or leverage beyond what is specified;
-- deployment beyond local `uvicorn` + `vite`.
+- deployment beyond local `uvicorn` + `vite`. The one exception is the static demo (§13, "Static demo"): a frontend build on GitHub Pages that replays recorded responses and runs no backend.
 
 ## 2. Global Conventions
 
@@ -72,6 +75,7 @@ A local, single-user research tool that:
 quant-engine/
   CLAUDE.md  README.md  .gitignore  .env.example  docker-compose.yml
   .github/workflows/ci.yml
+  .github/workflows/pages.yml  # Phase 9: builds and deploys the static demo
   backend/
     pyproject.toml           # ruff + pytest configuration
     requirements.txt         # exact pins (pip freeze of runtime deps)
@@ -89,22 +93,34 @@ quant-engine/
         data_loader.py       # cache + the single network seam fetch_from_yahoo()
         strategies.py        # scores, entry/exit rules, unit weights  (pure)
         sizing.py            # volatility-targeting overlay             (pure)
-        pipeline.py          # run_strategy() (§5.0) and run_sensitivity() (§9)  (pure)
-        backtester.py        # lag, returns, costs, equity, trades      (pure)
-        metrics.py           # performance metrics and warnings        (pure)
-        stats.py             # Engle–Granger, half-life                 (pure)
-        monte_carlo.py       # GBM, bootstrap, closed form              (pure)
+        pipeline.py          # run_strategy() (§5.0), run_sensitivity() (§9), run_walk_forward() (§9.2)  (pure)
+        backtester.py        # lag, returns, costs, borrow, equity, trades  (pure)
+        metrics.py           # metrics, cost sweep, rolling and calendar stats, warnings  (pure)
+        stats.py             # Engle–Granger, half-life, Kalman filter, deflated Sharpe  (pure)
+        monte_carlo.py       # GBM, block and stationary bootstrap, closed form  (pure)
     scripts/bench.py         # measured timings: the only source for runtime claims
+    scripts/seed_e2e.py      # Phase 8: writes the offline database the browser tests use
+    scripts/record_demo.py   # Phase 9: records the static demo's responses
     tests/                   # §12
+    tests/synthetic.py       # the synthetic-market generator, shared by conftest.py and seed_e2e.py
   frontend/                  # Vite React-TS app (§13)
+    e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests")
+    scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
+    public/demo/             # Phase 9: recorded responses for the static demo
   docs/METHODOLOGY.md        # §15
+  docs/screenshots/          # dashboard screenshots (Phase 3 on)
 ```
 - **Python:** 3.12 or later (developed on 3.14). List `tzdata` explicitly in the requirements: Windows has no system time-zone database, and `zoneinfo` needs one.
 - **PostgreSQL:** driver `psycopg[binary]`, URL form `postgresql+psycopg://…`. `docker-compose.yml` provides an optional Postgres 16.
 - **Lint:** `ruff check` and `ruff format --check` for the backend; ESLint from the Vite template for the frontend.
+- **Later dependencies.** Each is pinned exactly when its phase adds it:
+  - `arch` in `requirements.txt` (Phase 7), after the §10.8 check;
+  - `@playwright/test` in the frontend's devDependencies (Phase 8). Browsers are installed with `npx playwright install chromium`, and `--with-deps` in CI.
 - **CI (GitHub Actions, every push):**
   - backend lint and tests on Python 3.12 and 3.14;
-  - frontend `npm ci`, lint, `vitest run`, and `npm run build`.
+  - frontend `npm ci`, lint, `vitest run`, and `npm run build`;
+  - from Phase 8, a browser-test job on Ubuntu (§12, "Browser tests"). It installs Chromium with `npx playwright install --with-deps chromium`, seeds the offline database, and runs `npx playwright test`.
+- **Pages (Phase 9):** `pages.yml` builds the frontend with `VITE_DEMO=1` and deploys `dist/` to GitHub Pages on every push to `main`.
 - **Config files:**
   - `.env.example` lists every environment variable with its default.
   - `.gitignore` covers `.venv/`, `node_modules/`, `*.db`, `__pycache__/`, `.env` and `dist/`.
@@ -164,6 +180,7 @@ quant-engine/
   - a download error for any other exception, whose log text is the exception's repr, e.g. `ConnectionError('…')`.
 
   An unknown or delisted ticker logs a plain message such as `possibly delisted; no timezone found`, not an exception, so it stays an empty frame (404).
+- **Offline mode (Phase 8).** With the environment variable `QUANT_OFFLINE=1` (default unset; listed in `.env.example`), `fetch_from_yahoo` raises a 503 data-source error, `"Offline mode: {ticker} is not in the local cache"`, without importing or calling yfinance. The browser tests (§12) run the API this way, so a cache miss fails loudly instead of reaching the network.
 
 ### 4.4 Cleaning (tradable tickers)
 - Drop rows with a missing `close` or `adj_close`, de-duplicate dates (keep the last), and sort.
@@ -213,6 +230,13 @@ The overlay has to mask the score **before** the entry rule produces a signal. F
 4. **Unit weights** (`strategies.py`), including `beta_used` for B. They come out as a DataFrame on the run calendar whose column labels are the **tickers**, matching the returns frame `R` (§6.1).
 5. **Sizing** (`sizing.py`, only if `vol_target` is set): scale, refresh, W (§5.6). Without the overlay, W = the unit weights.
 6. **Evaluation**: t₀ = the position of the first non-NaN reported score; then `resolve_split` (§6.3), then the backtester (§6.1).
+
+Three later additions fit into these same steps:
+- the Kalman pairs model (§5.7) replaces the rolling-OLS score and β in step 1;
+- the trend portfolio (§5.8) runs steps 1–5 per asset;
+- the long-only switch (§5.9) clips the signal at the end of step 3.
+
+`run_strategy` also returns the untruncated raw weights W and the backtester's daily components (gross excess, borrow, turnover and cost). The cost sweep (§8.1) and walk-forward (§9.2) are built from these.
 
 ### 5.1 Entry/exit rule (shared by both strategies)
 - **Short** when z > z_entry; **long** when z < −z_entry.
@@ -371,6 +395,81 @@ If `W` contains NaN on any day, raise.
   - It is equivalent to checking `scale_used.shift(k + 1) ≥ max_leverage` (verified identical to 2e-16), but needs no shift arithmetic.
   - It is `null` when the overlay is off, and `null` when the strategy never held a position.
 
+### 5.7 Kalman-filter hedge ratio (pairs, `pairs_model="kalman"`; Phase 7)
+An alternative to §5.3's rolling OLS. The hedge ratio adapts at a rate set by δ rather than through a hard L-day window, and the score is the filter's standardized innovation. `pairs_model="ols"` (default) keeps §5.3 unchanged.
+
+**Model**, on the rebased log prices y and x of §5.3, following Chan (2013):
+- state s_t = (α_t, β_t)ᵀ, a random walk: s_t = s_{t−1} + w_t, with w_t ~ N(0, q·I₂);
+- observation y_t = h_t·s_t + e_t, with h_t = (1, x_t) and e_t ~ N(0, R);
+- q = δ / (1 − δ), where δ = `kalman_delta` (default 1e-4, valid range [1e-7, 1e-2]).
+
+**Initialization** from days 0…L−1, with H the L×2 matrix of rows (1, x_t):
+- ŝ = OLS of y on H;
+- R = SSR / (L − 2);
+- P = R·(HᵀH)⁻¹.
+
+This is the posterior of a flat prior after those L points. So **with δ = 0 the filter reproduces expanding-window OLS exactly**, which the tests use (§12). Verified with the recursion below: the largest deviation over 1,500 simulated days was 1.6e-15.
+
+**Degenerate inputs.** The model is undefined if either holds:
+- var(x over days 0…L−1, ddof=1) ≤ 1e-12, a flat-x window. This is §5.3's `vx > 1e-12` guard. Don't rely on `np.linalg.solve` raising `LinAlgError` instead. A constant window's HᵀH is only *nearly* singular after rounding, and `solve` then returns a large, meaningless answer without complaint. That happened for constants 0.0123, 0.1, 0.3 and 1/3; only an exact 0 raised (verified, numpy 2.5);
+- R ≤ 1e-8 × var(y over days 0…L−1, ddof=1), the §5.3 collinearity threshold. Every z is then NaN, so the run has no valid score and returns 422 (§6.2).
+
+**Recursion** for t = L, …, n−1. A plain loop is allowed here, because the filter is sequential.
+```python
+P = P + q * np.eye(2)                         # predict; the state mean is unchanged
+h = np.array([1.0, x[t]])
+e = y[t] - h @ s                              # innovation: the prediction uses data through t-1
+S = h @ P @ h + R                             # its variance
+z[t] = e / np.sqrt(S)                         # the score
+K = P @ h / S
+s = s + K * e                                 # filtered state: data through the close of t
+A = np.eye(2) - np.outer(K, h)
+P = A @ P @ A.T + R * np.outer(K, K)          # Joseph form: P stays symmetric positive definite
+beta[t] = s[1]
+```
+- The loop may be unrolled into scalar arithmetic on the 2×2 matrices for speed. It must match this matrix form within 1e-12.
+- z and β are NaN for t < L.
+
+**Everything downstream is §5.3 unchanged:**
+- the same entry/exit rule;
+- the same hedge modes, where `"rolling"` means the filtered β;
+- the same unit leg weights;
+- the same overlay input, u_t built with β_{t−1}.
+
+The §5.4 diagnostics are also unchanged. They test the pair, not the model.
+
+**Why the innovation z-score.** e_t is standardized by its own predicted variance, using only information through t−1. Under the model it is N(0, 1), so z_entry and z_exit keep roughly their §5.1 meaning. δ is itself a tuning parameter, and that is a limitation to document.
+
+### 5.8 Strategy D: multi-asset trend portfolio (`strategy="trend_portfolio"`; Phase 7)
+Time-series momentum the way Moskowitz, Ooi & Pedersen (2012) applied it:
+- every asset is scaled to the same ex-ante volatility (they used 40% per asset);
+- the signed positions are averaged across assets.
+
+Single-asset trend (§5.5) leaves out this diversification, which is where most of the published Sharpe ratio comes from.
+
+- **Legs.** `tickers` holds 2–12 distinct tickers, each traded with §5.5's signal using the same L and `signal_frequency`.
+- **Per asset i,** the §5.0 steps are:
+  1. m_i per §5.5.
+  2. σ_i per §5.6, with u = r_i (the asset's daily return); then mask m_i where σ_i is NaN.
+  3. Sampling and sign give s_i. The portfolio's **t₀ is the first date on which every leg's reported score is non-NaN.** Set every s_i to 0 before t₀. Then the portfolio starts with all its legs, and §6.1's "no signal before t₀" holds.
+  4. The unit weight is s_i / N.
+  5. scale_i = (vol_target / σ_i).clip(upper=max_leverage). `scale_used_i` follows §5.6's refresh rule with that leg's own signal. Then w_i = s_i·scale_used_i / N, set to exactly 0.0 where s_i = 0.
+- **Sizing is always on.** `vol_target` is the per-asset target: required for this strategy, default 0.40 (resolved like L). `vol_halflife`, `vol_refresh` and `max_leverage` apply as in §5.6. Each leg is at most max_leverage / N, so gross exposure Σ|w_i| ≤ `max_leverage` with no extra rule.
+- **Expected portfolio vol** is below the per-asset target when legs are imperfectly correlated. For N uncorrelated legs at target σ, it is σ/√N. That is arithmetic, not a measurement.
+- **Backtester inputs.** W has one column per leg. The signal passed as `s` is an "invested" flag: s_t = 1 if any s_i,t ≠ 0, else 0. The §6.1 checks then hold, and trades are identified per leg (§7).
+- **Calendar.** The intersection of every leg and SPY (§4.5). A leg with a short history shortens the whole run.
+- **Benchmark.** An equal-weight, daily-rebalanced, long-only basket of the legs: w_i = 1/N, no costs, never vol-targeted. It replaces §6.4's single-ticker buy-and-hold for this strategy.
+- **`pct_days_at_cap`** is the share of invested asset-days (leg i held into day t) on which |w_i,t−1| ≥ (max_leverage / N)·(1 − 1e-9).
+- **`pct_days_in_market`** counts the days on which any leg is held into the day. That is the per-leg `held_id` of §7.4, combined with "or". `n_closed_trades`, `win_rate` and `avg_holding_days` count leg trades.
+- `diagnostics` is `null`. `series.score` is `null`, and the per-leg scores are in `series.legs` (§11.3).
+
+### 5.9 Long-only switch (`allow_short`; Phase 5)
+- With `allow_short=false` (default `true`), clip the signal at the end of §5.0 step 3: `signal = signal.clip(lower=0)`. This covers mean reversion, trend, and each trend-portfolio leg.
+  - Mean reversion then takes only the long entries.
+  - Trend is long or flat.
+  - The §5.1 hysteresis legs are computed before the clip. The long and short legs are never on together, so the clipped signal is exactly the long leg.
+- Pairs always holds a short leg, so `allow_short=false` with `strategy="pairs"` returns 422: "pairs needs a short leg, so allow_short=false is not available".
+
 ## 6. Backtest Accounting (`services/backtester.py`)
 
 ### 6.1 Daily returns and costs
@@ -398,12 +497,16 @@ w_prev = w.shift(1).fillna(0.0)            # weights held into day t
 R = R.copy(); R.iloc[0] = 0.0              # only the first row may be NaN
 assert not R.isna().any().any() and not rf.isna().any()   # pandas .sum() would hide NaN as 0
 gross_excess = (w_prev * R.sub(rf, axis=0)).sum(axis=1)
+borrow = (borrow_bps / 10_000 / 252) * (-w_prev).clip(lower=0).sum(axis=1)   # fee on short notional held into t
 turnover = (w - w_prev).abs().sum(axis=1)  # every leg counts
 cost = c * turnover                        # charged on the trade day
-excess = gross_excess - cost               # daily return in excess of rf
+excess = gross_excess - borrow - cost      # daily return in excess of rf
 total = rf + excess                        # daily total return (cash earns rf)
 ```
-- In formula form: total_t = rf_t + Σ_i w_{i,t−1}(r_{i,t} − rf_t) − cost_t. Cash and short proceeds earn rf, and a flat day's excess return is exactly 0.
+- In formula form: total_t = rf_t + Σ_i w_{i,t−1}(r_{i,t} − rf_t) − borrow_t − cost_t. Cash and short proceeds earn rf, and a flat day's excess return is exactly 0.
+- **Borrow fee (Phase 5).** `borrow_bps` is an annual fee in basis points, default 0, valid 0–2,000. It is charged daily on the short notional held into the day: borrow_t = (b / 10,000 / 252)·Σ_i max(−w_{i,t−1}, 0). With the default of 0, every result matches the earlier phases exactly.
+  - It covers a single-asset short and the short leg of a pair.
+  - It is a flat rate: no hard-to-borrow tiers, recalls or rebates beyond rf.
 - Round-trip costs are 2c × gross exposure. Gross exposure is 1 without the overlay, for one asset or a pair. With vol targeting, size changes inside a trade also cost money; that turnover is charged and attributed to the trade (§7.1).
 - **Approximations** (document both):
   1. Cost is charged as a fraction of the day's starting equity. This ignores the second-order term cost × same-day return.
@@ -439,7 +542,7 @@ total = rf + excess                        # daily total return (cash earns rf)
   - its max drawdown is measured within the segment.
 
 ### 6.4 Benchmarks
-- Strategies A and C are benchmarked against buy-and-hold of the traded ticker. Strategy B is benchmarked against buy-and-hold of SPY. Benchmarks are never vol-targeted.
+- Strategies A and C are benchmarked against buy-and-hold of the traded ticker. Strategy B is benchmarked against buy-and-hold of SPY. Strategy D is benchmarked against its equal-weight basket (§5.8). Benchmarks are never vol-targeted and pay no borrow fee.
 - Benchmarks use the same evaluated window, rebased to E₀, with no costs and no cash (w = 1).
 - `benchmark_metrics` has the same fields as the strategy metrics. The trade and cost fields are `null`, and `pct_days_in_market` is 1.
 
@@ -455,7 +558,7 @@ Attribution follows P&L timing, not the position mask. Masking by `pos != 0` dro
 ```python
 a = w_prev.abs().sum(axis=1); b = w.abs().sum(axis=1)
 exit_frac = (a / (a + b).where(a + b > 0)).fillna(0.0)
-to_held = gross_excess - cost * exit_frac       # attributed to held_id
+to_held = gross_excess - borrow - cost * exit_frac   # attributed to held_id (the borrow fee is a holding cost)
 to_trade = -(cost - cost * exit_frac)           # attributed to trade_id
 pnl = (pd.concat([pd.DataFrame({"id": held_id, "v": to_held}),
                   pd.DataFrame({"id": trade_id, "v": to_trade})])
@@ -489,7 +592,15 @@ exit_date = last_held.reindex(ids).where(~is_open)                  # NaT -> nul
   - `signal_date` (k trading days before `entry_date`) and `entry_date`;
   - `exit_signal_date` and `exit_date` (`null` while open);
   - `holding_days`, `pnl`;
-  - `beta_at_entry`: `beta_used` on `signal_date` for pairs, `null` otherwise.
+  - `beta_at_entry`: `beta_used` on `signal_date` for pairs, `null` otherwise;
+  - `ticker`: the leg's ticker for the trend portfolio (§7.4), `null` otherwise.
+
+### 7.4 Per-leg trades (Strategy D; Phase 7)
+A trend portfolio holds several independent legs, so "a run of same-sign position" is defined **per leg**.
+- **Identification.** Use §7's formulas leg by leg, on pos_i = s_i.shift(k).fillna(0.0).
+- **Attribution.** Use §7.1 leg by leg, with that leg's own a = |w_{i,t−1}|, b = |w_{i,t}|, gross excess w_{i,t−1}(r_i − rf), borrow and cost c·|w_{i,t} − w_{i,t−1}|. Every term is a sum over legs, so the §7.2 reconciliation holds over all legs' trades together.
+- **Bookkeeping.** §7.3 runs per leg. Trade ids are numbered 1… across the whole portfolio, in order of entry date and then ticker.
+- In-trade resizing by the vol overlay is a cost of the leg's open trade, as in §7.1.
 
 ## 8. Metrics and Warnings (`services/metrics.py`)
 - Every metric is computed per segment (IS, OOS and full) over that segment's n evaluated days. Standard deviations use `ddof=1`.
@@ -513,6 +624,7 @@ exit_date = last_held.reindex(ids).where(~is_open)                  # NaT -> nul
 | `avg_holding_days` | mean holding days of closed trades | no closed trades |
 | `ann_turnover` | mean(turnover)·252 | benchmark |
 | `ann_cost_drag` | mean(cost)·252 | benchmark |
+| `ann_borrow_drag` | mean(borrow)·252 (Phase 5) | benchmark |
 | `avg_gross_exposure` | mean over all n days of Σ_i \|w_{i,t−1}\|, the exposure held into each day (flat days count as 0) | — (1 for benchmarks) |
 
 **Warnings** are a list of human-readable strings. Generate exactly these:
@@ -523,11 +635,40 @@ exit_date = last_held.reindex(ids).where(~is_open)                  # NaT -> nul
 - Rows dropped for non-positive prices, daily returns above 50%, and runs of 5 or more identical closes (§4.4).
 - Ruin (§6.2).
 - Vol targeting at the leverage cap on more than 25% of invested days: "the volatility target is not reachable within max_leverage".
+- The full-window break-even cost (§8.1) is below twice the request's `cost_bps`: "the strategy's edge is less than twice its trading cost". Skip this when the break-even is `null`.
+- Walk-forward (§9.2): a fold with no eligible configuration, "fold {k}: no configuration was eligible, so the walk-forward was flat"; and a selection that changed in more than half the folds, "the selected parameters were unstable across folds".
+
+### 8.1 Cost sweep and break-even cost (Phase 5)
+Positions never depend on the cost: signals, weights and turnover are fixed before §6.1 subtracts it. So the daily excess return at any one-way cost c is exactly
+
+  excess_t(c) = gross_excess_t − borrow_t − c·turnover_t,
+
+and a whole cost sweep comes from **one** run, with no re-running.
+- **Grid:** {0, 2, 5, 10, 20, 50, 100} bps, plus the request's own `cost_bps`, deduplicated and sorted.
+- **Sharpe at each cost:** the §8 Sharpe of excess(c), with its null rules, for each segment (IS, OOS, full).
+- **Break-even cost.** The Sharpe is 0 exactly when the mean excess is 0, so per segment:
+
+  c* = mean(gross_excess − borrow) / mean(turnover), reported in bps (× 10,000).
+
+  It is `null` when the segment has no turnover, or when mean(gross_excess − borrow) ≤ 0, i.e. the strategy loses money before trading costs. The UI says which.
+- **Ruin.** If the run was ruined (§6.2), the whole `cost_sensitivity` object is `null`. Clipping makes excess non-linear in c, and a different cost would move the ruin day. For a cost in the grid, the first evaluated day whose unclipped total at that cost is ≤ −1 is that cost's ruin day r_c. This mirrors §6.2:
+- a segment that contains r_c, or starts after it, gets a `null` Sharpe at that cost, and full always contains it. The break-even cost is one value per segment, not per grid cost, so this rule doesn't touch it;
+- a segment that ends before r_c keeps its values (an IS segment is unaffected by OOS ruin).
+- **Limitation (document it).** The sweep holds behaviour fixed. A trader facing higher costs would trade less, so the sweep slightly understates what a re-optimized strategy could earn at high costs.
+
+### 8.2 Rolling and calendar statistics (Phase 5)
+- **Rolling Sharpe and beta.** Trailing 252 evaluated days, `min_periods=252`, on daily excess returns, aligned to `series.dates` and `null` elsewhere.
+  - `rolling_sharpe` is the §8 Sharpe of the window, annualized.
+  - `rolling_beta` is the OLS slope on SPY's excess return.
+  - Each window follows §8's null rules: no held day in the window, or a std below 1e-12, gives `null`.
+- **Monthly and annual returns.** Total returns compounded within each calendar month, and each calendar year, of the evaluation window. Each is given for the strategy and for its benchmark.
+  - A period is `partial` when the window doesn't include every run-calendar day of it.
+  - The window's last period is also `partial` when the run ended by ruin, or when the resolved `end` falls before the period's last calendar day.
 
 ## 9. Parameter Sensitivity (`POST /api/sensitivity`)
 - **Default grids.** All other parameters, including the vol-targeting settings, come from the request.
   - Strategies A and B: L ∈ {20, 40, 60, 90, 120} × z_entry ∈ {1.5, 2.0, 2.5, 3.0}, i.e. 20 configurations. `z_exit` comes from the request.
-  - Strategy C: L ∈ {21, 63, 126, 252, 378} (1, 3, 6, 12 and 18 months), i.e. 5 configurations. There is no z_entry axis, so `z_entry_values` is `null` and the Sharpe matrix has a single column.
+  - Strategies C and D: L ∈ {21, 63, 126, 252, 378} (1, 3, 6, 12 and 18 months), i.e. 5 configurations. There is no z_entry axis, so `z_entry_values` is `null` and the Sharpe matrix has a single column.
 - A request may override the grid, with at most 8 values per axis. Every z_entry must be greater than z_exit. For Strategy C, overriding `z_entry_values` is ignored.
 - **Implementation.** `pipeline.run_sensitivity(prices, rf, params, grid)` is a pure function that implements the grid; the endpoint only calls it. It loops over the configurations (this loop is allowed), in three steps:
   1. **Resolve the split once**, for the request's own configuration: `split_date = resolve_split(...)`, exactly as `/api/backtest` would.
@@ -542,6 +683,76 @@ exit_date = last_held.reindex(ids).where(~is_open)                  # NaT -> nul
 - **Response:** the IS Sharpe matrix (rows = L, columns = z_entry, `null` where undefined), `n_configs_tested`, the window, and the request's own cell.
   - **OOS results are never used or returned.** Each configuration is still backtested over the whole calendar, so OOS returns exist internally, but only the common IS window is scored.
 - The UI notes that this window can differ slightly from the KPI grid's IS window.
+
+### 9.1 Deflated Sharpe ratio (Phase 5)
+Picking the best of N configurations inflates its Sharpe ratio even when no configuration has any skill. The deflated Sharpe ratio (DSR) of Bailey & López de Prado (2014) is the probability that the true Sharpe exceeds what the best of N skill-less trials would show by luck. `/api/sensitivity` reports it alongside the grid.
+
+**Inputs.** All on the common window:
+- the trials are the grid cells with a non-null Sharpe, N = `n_trials` of them;
+- every Sharpe ratio here is **daily**, not annualized: SR = annual / √252;
+- V = the variance across trials of their daily Sharpe ratios (ddof = 1).
+
+**Expected maximum Sharpe under no skill**, with γ = 0.5772156649 (the Euler–Mascheroni constant) and Φ⁻¹ the standard normal quantile:
+
+  SR₀* = √V · [(1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))]
+
+**Probabilistic Sharpe ratio** of a configuration (Bailey & López de Prado 2012). Its daily Sharpe is ŜR over its n daily excess returns on the window, with sample skewness γ̂₃ and sample (non-excess) kurtosis γ̂₄. Compute them with `scipy.stats.skew(x, bias=False)` and `scipy.stats.kurtosis(x, fisher=False, bias=False)`.
+
+  PSR(SR*) = Φ( (ŜR − SR*)·√(n − 1) / √(1 − γ̂₃·ŜR + ((γ̂₄ − 1)/4)·ŜR²) )
+
+**DSR = PSR(SR₀*).** Report it for two configurations:
+- the request's own cell (`selected`);
+- the best cell, the highest IS Sharpe, with ties going to the first in grid order (rows by L, then z_entry).
+
+**Null rules, field by field:**
+- **`sr0_star`** is `null` when N < 2 or V < 1e-24.
+- **`best`** is `null` only when N = 0. Otherwise it names the best cell and its Sharpe, even if its `dsr` is `null`.
+- **`dsr`** (in `best`) and **`selected_dsr`** are `null` when any of these holds:
+  - `sr0_star` is `null`;
+  - the configuration's Sharpe is `null`;
+  - the term under the square root is ≤ 0.
+
+  `selected_dsr` is also `null` when the request's cell isn't in the grid.
+
+**What it does and doesn't cover (document it).**
+- N counts only this grid. Every configuration the user tried before, by hand or in earlier runs, is a hidden trial that the DSR can't see.
+- The formula assumes the trials are independent. Neighbouring grid cells are strongly correlated, so N overstates the number of *independent* trials and the DSR errs on the conservative side.
+
+### 9.2 Walk-forward analysis (`POST /api/walk-forward`; Phase 6)
+The sensitivity grid picks parameters on in-sample data, but the user then reads OOS results and iterates, which quietly turns OOS into IS (§15). Walk-forward makes the selection part of the protocol: in each fold, choose on the training window, trade the choice on the next test window, and stitch the test windows into one out-of-sample track record.
+
+`pipeline.run_walk_forward(prices, rf, params, grid, train_days, test_days, anchored)` is pure. The endpoint only calls it.
+
+1. **Run the grid.** Same grid and overrides as §9, each configuration through `run_strategy` with its own t₀ and the request's resolved split. The split only satisfies `run_strategy`; walk-forward has no IS/OOS split of its own. Keep, for each configuration:
+   - its untruncated executed weights w = W.shift(k).fillna(0.0) (§5.0);
+   - its daily excess returns;
+   - its first evaluated day;
+   - its ruin day, if any.
+2. **Folds.** s = the latest first-evaluated day across the grid (the §9 common start), T = `train_days` (default 756, valid 252–2,520) and S = `test_days` (default 63, valid 21–252). With positions on the run calendar, fold j = 0, 1, … has:
+   - test window [s + T + jS, s + T + (j+1)S), cut at the end of the calendar;
+   - training window [s + jS, s + T + jS) when rolling (the default), or [s, s + T + jS) when `anchored=true`.
+
+   Drop a final test window shorter than 21 days. Fewer than 2 folds returns 422 with the counts.
+3. **Selection** at the start of fold j uses only data through the training window's last close:
+   - Eligible configurations started evaluating by the training window's first day, were not ruined on or before its last day, and have a non-null §8 Sharpe on it.
+   - Pick the highest training Sharpe, with ties going to grid order.
+   - If none is eligible, the fold is flat (zero weights) and gets a warning.
+4. **Stitching.** The chosen configuration controls the executed weights from the close **before** its test window through the close before the next test window: w*_t = w^(j)_t for t ∈ [b_j − 1, b_{j+1} − 1), where b_j is the test window's first day. Then apply §6.1's formulas (from `gross_excess` on, with c and the borrow fee) and §6.2's ruin rule to w*.
+   - Switching configurations is therefore an ordinary trade at that close, charged as turnover |w^(j)_{b−1} − w^(j−1)_{b−1}|.
+   - The first fold's entry cost falls on day b₀ − 1, which is the walk-forward's first evaluated day. Its baseline is b₀ − 2.
+   - **Which fold owns which day.** Fold j owns the stitched days [b_j, b_{j+1}), and fold 0 also owns day b₀ − 1, its entry day. The switch into fold j + 1 trades at the close of b_{j+1} − 1, so its cost falls on fold j's last day. That is the cost of leaving fold j's configuration, the same way a trade's exit cost belongs to that trade (§7.1). `series.fold` is 0 on day b₀ − 1, j on fold j's days, and `null` before.
+   - **`test_sharpe`** is the §8 Sharpe of the **stitched** excess over the days fold j owns. It is not the chosen configuration's own excess, so it includes the costs the stitched portfolio actually paid. The folds' days partition the stitched window, so the folds' summed excess equals the total.
+5. **Outputs:**
+   - §8 metrics of the stitched series, with the trade fields `null`, because trades span configurations;
+   - the same metrics for the request's own configuration over the same window, as a fixed-parameter comparison;
+   - the benchmark over the same window;
+   - the fold table;
+   - equity series;
+   - `n_distinct_selected`.
+
+   The stitched series is never stored.
+
+Every quantity is causal. The weights at a close depend only on prices through that close, and the selection for fold j uses only returns through b_j − 1. So the look-ahead perturbation test (§12) applies to the stitched series too.
 
 ## 10. Monte Carlo (`services/monte_carlo.py`)
 
@@ -593,7 +804,7 @@ np.cumsum(P, axis=0, out=P)
 - Expose the increment generators separately from path aggregation, so tests can inspect the raw increments.
 
 ### 10.4 Outputs (for each model)
-Draw from one `rng` in a fixed order: GBM increments, GBM sample-path choice, bootstrap increments, bootstrap sample-path choice. For each model, in this order:
+Draw from one `rng` in a fixed order: GBM increments, GBM sample-path choice, bootstrap increments, bootstrap sample-path choice, then (Phase 7) stationary-bootstrap increments and its sample-path choice. The stationary model's draws come last, so a given seed's GBM and block-bootstrap outputs don't change when it is added. For each model, in this order:
 1. `terminal = np.expm1(P[-1])`, as a copy.
 2. **20 sample paths:** `cols = rng.choice(N, 20, replace=False)`, then `np.exp(P[:, cols])`.
 3. **Percentile bands** p5/p25/p50/p75/p95 of the equity multiple for t = 0..T:
@@ -606,9 +817,9 @@ Draw from one `rng` in a fixed order: GBM increments, GBM sample-path choice, bo
    - VaR_α = −Q_{1−α}(terminal)
    - CVaR_α = −mean(terminal | terminal ≤ Q_{1−α})
 
-**After both models have run:** build the **histogram**. Its 50 bins share edges across both models, spanning the 0.1% to 99.9% quantiles of the pooled terminal returns. Values outside that range go into the first or last bin.
+**After every model has run:** build the **histogram**. Its 50 bins share edges across all the models, spanning the 0.1% to 99.9% quantiles of the pooled terminal returns. Values outside that range go into the first or last bin. From Phase 7 the pool includes the stationary bootstrap, so the edges, and with them the counts, differ from earlier phases for the same seed.
 ```python
-lo, hi = np.quantile(np.concatenate([terminal_gbm, terminal_boot]), [0.001, 0.999])
+lo, hi = np.quantile(np.concatenate([terminal_gbm, terminal_boot]), [0.001, 0.999])   # + terminal_stat from Phase 7
 edges = np.linspace(lo, hi, 51)
 assert np.all(np.diff(edges) > 0)
 counts = np.histogram(np.clip(terminal, edges[0], edges[-1]), bins=edges)[0]   # per model
@@ -629,10 +840,40 @@ Return both α levels next to the simulated values. During review, simulation ag
 - Return `elapsed_ms` for each model and for the total, measured with `time.perf_counter()`.
 - **API caps** (n_paths ≤ 50,000, and n_paths × (horizon + 1) ≤ 12,700,000) keep peak memory around 200 MB. For comparison, the bootstrap at 100k × 252 measured 410 MB.
 
+### 10.7 Model 3: stationary bootstrap (Phase 7)
+The stationary bootstrap of Politis & Romano (1994) draws blocks with **random**, geometrically distributed lengths, mean `block_len`, instead of a fixed length. The resampled series is then stationary, and the results are less sensitive to the exact block length.
+- At each step, with probability p = 1/`block_len`, start a new block at a uniform random index. Otherwise continue with the next index, circularly. Step 0 always starts a block.
+- **Vectorized per chunk of paths.** Process the N paths in column chunks of at most 2,048, filling `P[1:, chunk]` in place. The temporaries are then about 3 × T × 2,048 values instead of 3 × T × N, so peak memory stays near the §10.6 budget. The chunk loop is allowed.
+  ```python
+  t = np.arange(T)[:, None]
+  for cols in chunks:                                        # in order; each chunk draws its own numbers
+      new = rng.random((T, len(cols))) < p
+      new[0] = True
+      start = rng.integers(0, n_hist, size=(T, len(cols)))   # int64
+      last = np.maximum.accumulate(np.where(new, t, 0), axis=0)   # the row where the current block began
+      idx = np.take_along_axis(start, last, axis=0) + (t - last)
+      np.take(ell, idx, out=P[1:, cols], mode="wrap")
+  np.cumsum(P, axis=0, out=P)
+  ```
+  `np.take` accepts the strided column slice `P[1:, cols]` as `out` (verified, numpy 2.5, in the backend venv).
+- The outputs are §10.4's, under the key `stationary`. `zero_drift` demeans ℓ exactly as for the block bootstrap.
+
+### 10.8 Automatic block length (Phase 7)
+`block_len` may be `"auto"`. The block lengths then come from the Politis & White (2004) estimator, with the correction of Patton, Politis & White (2009), applied to ℓ:
+- the circular value for the moving-block bootstrap;
+- the stationary value for the stationary bootstrap.
+
+Use `arch.bootstrap.optimal_block_length` from the `arch` package, rounded up and clipped to [1, min(63, ⌊n_hist/2⌋)]. Before using it, check three things and report any that fail (§0, rule 2):
+- `arch` installs on Python 3.12 and 3.14 on both Windows and Ubuntu;
+- the function's output columns are named as described;
+- it returns the values above on a reference series.
+
+The response reports the lengths actually used.
+
 ## 11. API Contract (`main.py`, `schemas.py`)
 
 ### 11.1 Endpoints
-`GET /api/health`, `POST /api/backtest`, `POST /api/sensitivity`, `POST /api/monte-carlo`.
+`GET /api/health`, `POST /api/backtest`, `POST /api/sensitivity`, `POST /api/monte-carlo`; from Phase 6, `POST /api/walk-forward`; from Phase 8, `GET /api/runs` and `GET /api/runs/{id}` (§11.4).
 - **Handlers are plain `def`, not `async def`.** The work is CPU-bound and yfinance blocks. FastAPI runs `def` handlers in a thread pool, whereas blocking inside `async def` stalls the event loop.
 - CORS origins come from `CORS_ORIGINS` (default `http://localhost:5173`). The Vite dev server also proxies `/api`.
 - **Errors** return `{"detail": "..."}` with these status codes:
@@ -645,17 +886,21 @@ Return both α levels next to the simulated values. During review, simulation ag
 
 | Field | Type | Default | Rule |
 |---|---|---|---|
-| `strategy` | `"mean_reversion"` \| `"pairs"` \| `"trend"` | required | |
-| `tickers` | list[str] | required | 1 for mean_reversion and trend, 2 distinct for pairs; uppercased before validation; `^[A-Z0-9.^=-]{1,15}$` |
+| `strategy` | `"mean_reversion"` \| `"pairs"` \| `"trend"` \| `"trend_portfolio"` | required | `trend_portfolio` from Phase 7 |
+| `tickers` | list[str] | required | 1 for mean_reversion and trend, 2 distinct for pairs, 2–12 distinct for trend_portfolio; uppercased before validation; `^[A-Z0-9.^=-]{1,15}$` |
 | `start`, `end` | date | required | start ≥ 1990-01-01; end clamped to today_ny() − 1 day (echoed back in `resolved`); start < end must still hold after clamping |
-| `L` | int \| null | null → 60 (mean_reversion, pairs) or 252 (trend) | 10–252 for mean_reversion and pairs; 21–504 for trend. The default is resolved after the strategy is known (a Pydantic model validator) and echoed in `resolved` |
+| `L` | int \| null | null → 60 (mean_reversion, pairs) or 252 (trend, trend_portfolio) | 10–252 for mean_reversion and pairs; 21–504 for trend and trend_portfolio. The default is resolved after the strategy is known (a Pydantic model validator) and echoed in `resolved` |
 | `z_entry` | float | 2.0 | 0 < z_entry ≤ 5; mean_reversion and pairs only |
 | `z_exit` | float | 0.5 | 0 ≤ z_exit < z_entry; mean_reversion and pairs only |
-| `signal_frequency` | `"monthly"` \| `"daily"` | `"monthly"` | trend only |
+| `signal_frequency` | `"monthly"` \| `"daily"` | `"monthly"` | trend and trend_portfolio only |
 | `cost_bps` | float | 10 | 0–100; one-way, per leg |
 | `execution_lag` | int | 1 | 0–5 |
 | `hedge_mode` | `"fixed_at_entry"` \| `"rolling"` | `"fixed_at_entry"` | pairs only |
-| `vol_target` | float \| null | null (overlay off) | 0.01–0.50 (annualized) |
+| `pairs_model` | `"ols"` \| `"kalman"` | `"ols"` | pairs only (Phase 7, §5.7) |
+| `kalman_delta` | float | 1e-4 | 1e-7–1e-2; pairs with `pairs_model="kalman"` only |
+| `borrow_bps` | float | 0 | 0–2,000; annual fee on short notional (Phase 5, §6.1) |
+| `allow_short` | bool | true | false is 422 for pairs (Phase 5, §5.9) |
+| `vol_target` | float \| null | null (overlay off); for trend_portfolio, null → 0.40 | 0.01–0.50 (annualized); 0.05–0.60 per asset for trend_portfolio, where the overlay is always on (§5.8) |
 | `vol_halflife` | int | 42 | 5–126; only when `vol_target` is set |
 | `vol_refresh` | `"daily"` \| `"weekly"` \| `"monthly"` | `"weekly"` | only when `vol_target` is set |
 | `max_leverage` | float | 2.0 | 1–4; only when `vol_target` is set |
@@ -664,17 +909,23 @@ Return both α levels next to the simulated values. During review, simulation ag
 | `initial_capital` | float | 100000 | > 0 |
 
 **Fields that don't apply** to the chosen mode are **ignored, never rejected**, and are echoed as `null` in `resolved`. That covers:
-- `z_entry` and `z_exit` for trend;
+- `z_entry` and `z_exit` for trend and trend_portfolio;
 - `signal_frequency` for mean_reversion and pairs;
-- `hedge_mode` for mean_reversion and trend;
-- `vol_halflife`, `vol_refresh` and `max_leverage` when `vol_target` is null;
+- `hedge_mode` and `pairs_model` for every strategy except pairs;
+- `kalman_delta` unless the strategy is pairs with `pairs_model="kalman"`;
+- `vol_halflife`, `vol_refresh` and `max_leverage` when `vol_target` is null (never for trend_portfolio, whose `vol_target` always resolves);
 - in Monte Carlo requests, `window` and `backtest` when source = ticker, and `ticker`/`start`/`end` when source = strategy.
 
 Fields the table marks "required iff" still return 422 when missing.
 
 **`SensitivityRequest`** is `BacktestRequest` plus two optional grid overrides:
 - `L_values`: at most 8 values, each within the strategy's L range.
-- `z_entry_values`: at most 8 values, each in (z_exit, 5]. Ignored for trend.
+- `z_entry_values`: at most 8 values, each in (z_exit, 5]. Ignored for trend and trend_portfolio.
+
+**`WalkForwardRequest`** (Phase 6) is `SensitivityRequest` plus:
+- `train_days`: int, default 756, valid 252–2,520;
+- `test_days`: int, default 63, valid 21–252;
+- `anchored`: bool, default false (§9.2).
 
 **`MonteCarloRequest`**
 
@@ -686,7 +937,7 @@ Fields the table marks "required iff" still return 422 when missing.
 | `ticker`, `start`, `end` | str, date, date | — | required iff source = ticker; validated like `BacktestRequest` |
 | `n_paths` | int | 10000 | 1,000–50,000 |
 | `horizon` | int | 252 | 5–504; and n_paths × (horizon + 1) ≤ 12,700,000 |
-| `block_len` | int | 10 | 1–63; ≤ n_hist / 2 |
+| `block_len` | int \| `"auto"` | 10 | 1–63; ≤ n_hist / 2; `"auto"` from Phase 7 (§10.8). For the stationary bootstrap it is the mean block length |
 | `seed` | int \| null | null | 0 ≤ seed < 2^53 |
 | `zero_drift` | bool | false | |
 
@@ -702,13 +953,16 @@ type Metrics = {
   pct_days_in_market: number; n_closed_trades: number | null; n_open_trades: number | null;
   win_rate: number | null; avg_holding_days: number | null;
   ann_turnover: number | null; ann_cost_drag: number | null;   // trade/cost fields are null for benchmarks
+  ann_borrow_drag: number | null;                               // Phase 5; null for benchmarks
   avg_gross_exposure: number;                                   // 1 for benchmarks
 };
 type Trade = {
   id: number; side: "long" | "short"; segment: "is" | "oos"; open: boolean;
   signal_date: string; entry_date: string; exit_signal_date: string | null; exit_date: string | null;
   holding_days: number; pnl: number; beta_at_entry: number | null;
+  ticker: string | null;                                        // Phase 7: the leg, for trend_portfolio only
 };
+type BySegment<T> = { is: T; oos: T | null; full: T };          // oos is null only if ruin happened in IS
 type BacktestResponse = {
   run_id: number; engine_version: string;
   resolved: ResolvedBacktestRequest & { split_date: string; first_evaluated_date: string; rf_source: string };
@@ -719,10 +973,14 @@ type BacktestResponse = {
     daily_return: (number | null)[];          // daily TOTAL return (matches equity); null up to and including the baseline
     position: number[];                       // executed position pos
     gross_exposure: number[];                 // executed sum of |w| at the end of each day (shows leverage over time)
-    score: (number | null)[];                 // z (mean_reversion, pairs) or sampled trailing excess return m (trend)
-    beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only
-    vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off
+    score: (number | null)[] | null;          // z (mean_reversion, pairs) or sampled trailing excess return m (trend);
+                                              // null for trend_portfolio (Phase 7), whose scores are in legs
+    beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only (filtered beta with pairs_model="kalman")
+    vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off and for trend_portfolio
     is_oos: boolean[];
+    rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // Phase 5, §8.2
+    legs: { ticker: string; score: (number | null)[]; position: number[];
+            weight: number[]; vol_forecast: (number | null)[] }[] | null; // Phase 7: trend_portfolio only; executed values
   };
   sizing: { vol_target: number; max_leverage: number;
             pct_days_at_cap: number | null } | null;   // whole object null when the overlay is off; pct null if never invested
@@ -731,13 +989,33 @@ type BacktestResponse = {
   benchmark_metrics: { is: Metrics; oos: Metrics | null; full: Metrics };  // same window as the strategy
   diagnostics: { coint_p_is: number | null; coint_p_oos: number | null; half_life_is: number | null;
                  static_beta_is: number | null; static_alpha_is: number | null } | null;    // pairs only (null for mean_reversion and trend)
+  cost_sensitivity: { cost_bps: number[];                       // Phase 5, §8.1; null if ruined
+                      sharpe: BySegment<(number | null)[]>;     // one value per cost_bps entry
+                      break_even_bps: BySegment<number | null> } | null;
+  calendar: { monthly: { year: number; month: number; strategy: number; benchmark: number; partial: boolean }[];
+              annual: { year: number; strategy: number; benchmark: number; partial: boolean }[] };   // Phase 5, §8.2
   ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 type SensitivityResponse = {
-  L_values: number[]; z_entry_values: number[] | null;          // null for trend
+  L_values: number[]; z_entry_values: number[] | null;          // null for trend and trend_portfolio
   sharpe: (number | null)[][];                                  // rows = L; one column for trend
   n_configs_tested: number; window: { start: string; end: string };
   selected: { L: number; z_entry: number | null } | null;       // the request's own cell, if it is in the grid
+  deflated: { n_trials: number; sr0_star: number | null;        // Phase 5, §9.1; sr0_star annualized for display
+              selected_dsr: number | null;
+              best: { L: number; z_entry: number | null; sharpe: number; dsr: number | null } | null };
+};
+type WalkForwardResponse = {                                    // Phase 6, §9.2
+  resolved: ResolvedBacktestRequest & { train_days: number; test_days: number; anchored: boolean;
+                                        L_values: number[]; z_entry_values: number[] | null };
+  folds: { train_start: string; train_end: string; test_start: string; test_end: string;   // inclusive dates
+           selected: { L: number; z_entry: number | null } | null;                          // null = flat fold
+           train_sharpe: number | null; test_sharpe: number | null }[];
+  n_configs: number; n_distinct_selected: number;
+  series: { dates: string[]; equity: (number | null)[]; fixed_equity: (number | null)[];
+            benchmark_equity: (number | null)[]; fold: (number | null)[] };   // fold index of each test day
+  metrics: Metrics; fixed_metrics: Metrics; benchmark_metrics: Metrics;   // stitched metrics have null trade fields
+  ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 type ModelResult = {
   bands: { p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] };   // length T+1
@@ -746,13 +1024,34 @@ type ModelResult = {
   var95: number; var99: number; cvar95: number; cvar99: number; elapsed_ms: number;
 };
 type MonteCarloResponse = {
-  resolved: ResolvedMonteCarloRequest & { seed: number; n_hist: number; mu_daily: number; sigma_daily: number };
+  resolved: ResolvedMonteCarloRequest & { seed: number; n_hist: number; mu_daily: number; sigma_daily: number;
+                                          block_len_used: { circular: number; stationary: number } };   // Phase 7
   gbm: ModelResult; bootstrap: ModelResult;
+  stationary: ModelResult;                                      // Phase 7, §10.7
   closed_form_gbm: { var95: number; var99: number; cvar95: number; cvar99: number };
   hist_edges: number[];            // 51, shared by both models
   elapsed_ms_total: number;
 };
 ```
+
+### 11.4 Run history (Phase 8)
+`backtest_runs` already stores every successful backtest (§4.1). These two read-only endpoints expose it.
+- **`GET /api/runs?limit=50`** lists runs newest first. `limit` is valid 1–500. The summary fields are read from the stored JSON:
+  ```ts
+  type RunSummary = { id: number; created_at: string;        // ISO 8601, UTC
+                      engine_version: string; strategy: "mean_reversion" | "pairs" | "trend" | "trend_portfolio";
+                      tickers: string[]; start: string; end: string;
+                      sharpe_full: number | null; sharpe_oos: number | null;
+                      total_return_full: number; max_drawdown_full: number };
+  ```
+- **`GET /api/runs/{id}`** returns one run, or 404 `"No run {id}"`:
+  ```ts
+  type RunDetail = { id: number; created_at: string; engine_version: string;
+                     resolved: ResolvedBacktestRequest & { split_date: string; first_evaluated_date: string; rf_source: string };
+                     metrics: BySegment<Metrics>; benchmark_metrics: BySegment<Metrics> };
+  ```
+- **Old rows.** Runs stored by an earlier engine version can lack fields added later, such as `ann_borrow_drag`. Missing fields are returned as `null`, and the UI flags runs whose `engine_version` differs from the current one. Old rows are never rewritten.
+- Equity curves are not stored, so comparisons cover metrics only. Re-running a stored request reproduces its curves on the same cached data (§14).
 
 ## 12. Tests (pytest; no network; full suite under 60 s)
 
@@ -769,6 +1068,8 @@ type MonteCarloResponse = {
   - Trend's default sensitivity grid (largest L = 378) keeps a common IS window longer than 252 days.
 - Short hand-built series are fine for unit tests that call pure functions directly.
 - **Database.** Each test gets a temp-file SQLite database (`tmp_path`), wired in with a dependency override.
+- **Shared generator (Phase 8).** The synthetic market moves to `tests/synthetic.py`, so `scripts/seed_e2e.py` can write the same data into the browser tests' database (§12, "Browser tests").
+- **Trend-portfolio universe (Phase 7).** Four more synthetic assets with different volatilities (about 8%, 15%, 20% and 30% a year) and a fixed seed, on the same calendar.
 
 ### `test_strategies.py`
 1. **Entry/exit rule against a reference loop.** The vectorized rule must match a reference state machine (written as a loop in the test) bit for bit. Test at least 1,000 random z sequences, including NaNs and values exactly at the thresholds.
@@ -795,9 +1096,27 @@ type MonteCarloResponse = {
    - With `vol_refresh="weekly"`, `scale_used` changes only on first trading days of weeks or on signal changes (measured: zero violations).
    - A `vol_halflife` longer than the strategy's lookback delays t₀ to the forecast's first valid day. Check this for all three strategies through `run_strategy` (§5.0), including pairs, whose forecast depends on the strategy's own rolling β.
    - Weights are exactly 0.0 whenever flat.
+9. **Kalman pairs model (Phase 7):**
+   - **Against OLS.** With δ = 0, the filtered (α_t, β_t) equals an expanding-window OLS of y on (1, x) over days 0…t within 1e-8, on at least 20 sampled t (§5.7).
+   - **Against the reference.** It matches the plain matrix recursion of §5.7 within 1e-12 (this covers an unrolled implementation), and P stays symmetric with positive eigenvalues throughout.
+   - **Standardization.** On data simulated from the model itself, with known δ and R, the innovation z has mean within 0.05 of 0 and std within 0.05 of 1 over 5,000 days.
+   - **Degenerate inputs.** Exactly collinear log prices or a flat-X warm-up window give an all-NaN z, a flat signal and no inf.
+10. **Trend portfolio (Phase 7):**
+    - each leg's score equals single-asset trend's score for that ticker (§5.5), masked by that leg's forecast;
+    - t₀ is the first date on which every leg's score is valid, and every weight before it is exactly 0.0;
+    - w_i = s_i·scale_used_i / N exactly, and Σ|w_i| ≤ max_leverage on every day;
+    - with constant-vol synthetic assets, a constant signal and no cap binding, every leg's realized vol / (target / N) lies in [0.8, 1.2] after 3 half-lives.
+11. **Long-only switch (Phase 5).** With `allow_short=false`, mean reversion, trend and every trend-portfolio leg never hold a negative position. A mean-reversion run's long trades have exactly the same dates and P&L as the long trades of the same run with shorting allowed (the ids differ).
 
 ### `test_backtester.py`
-1. **Look-ahead perturbation (the most important test).** Cover every strategy, both hedge modes, both trend signal frequencies, and vol targeting off and on with each refresh schedule. In each case:
+1. **Look-ahead perturbation (the most important test).** Cover every strategy, both hedge modes, both trend signal frequencies, and vol targeting off and on with each refresh schedule. From the phase that adds each, also cover:
+   - the Kalman model;
+   - the trend portfolio;
+   - `allow_short=false`;
+   - a non-zero borrow fee;
+   - the walk-forward stitched series, where "excess" is the stitched excess.
+
+   In each case:
    - multiply all prices strictly after date k by random lognormal noise;
    - score, signal, weights, `vol_forecast`, `pos`, excess and total for every date ≤ k must be bit-identical (`np.array_equal(a, b, equal_nan=True)`). The review prototype measured zero differences across all trend and overlay combinations;
    - use at least 4 values of k;
@@ -845,6 +1164,22 @@ type MonteCarloResponse = {
     - it equals the share of invested days whose held gross exposure is ≥ `max_leverage` × (1 − 1e-9);
     - it agrees with the `scale_used.shift(k + 1) ≥ max_leverage` formulation for k ∈ {0, 1, 2};
     - it is `null` for a run with the overlay on that never holds a position, and the whole `sizing` object is `null` with the overlay off.
+11. **Borrow fee (Phase 5):**
+    - a constant short of weight −1 with c = 0 has excess = −(r − rf) − b/10,000/252 exactly on every held day;
+    - long-only runs and flat days pay exactly 0;
+    - with `borrow_bps=0`, every output is bit-identical to the run without the field;
+    - reconciliation (item 5) still holds with the fee on.
+12. **Per-leg trades (Phase 7).** On the trend portfolio, over at least 50 random runs, the P&L of all legs' trades sums to the total excess within 1e-9. Every trade carries its leg's `ticker`, and each leg's trades never overlap in time.
+13. **Cost sweep (Phase 5, §8.1):**
+    - the Sharpe at the request's own cost equals the run's metric Sharpe, per segment;
+    - re-running the backtest at each grid cost reproduces the sweep's Sharpe within 1e-12 (the linearity claim);
+    - at c = break-even, the mean excess is 0 within 1e-15, and the Sharpe is 0 or `null`;
+    - a never-trading run gives `null` break-even and a ruined run gives a `null` `cost_sensitivity`.
+14. **Rolling and calendar statistics (Phase 5, §8.2):**
+    - each `rolling_sharpe` value equals the §8 Sharpe recomputed on its 252-day window;
+    - values before the 252nd evaluated day are `null`;
+    - compounding the monthly returns within a year reproduces that year's annual return;
+    - a window that starts mid-month marks its first month `partial`.
 
 ### `test_sensitivity.py`
 These test `pipeline.run_sensitivity` directly.
@@ -853,6 +1188,23 @@ These test `pipeline.run_sensitivity` directly.
 - **Slice scoring.** Each cell equals the §8 Sharpe of that configuration's daily excess returns on the common window, recomputed independently in the test.
 - **Undefined cells.** A configuration with no exposure in the window (e.g. `z_entry_values=[5.0]` on calm data) gives a `null` cell, not an error.
 - **Not enough history.** On 756 trading days (about 3 years), the trend backtest at L = 252 succeeds, but the default trend grid raises an error that names L = 378. The review prototype checked 58 start-date alignments: in every one the backtest's split leaves 337–352 IS days and 145–151 OOS days, while the L = 378 common window is only 209–231 days.
+- **Deflated Sharpe (Phase 5, §9.1):**
+  - SR₀* and PSR match an independent implementation written in the test, from the §9.1 formulas, within 1e-12;
+  - with N = 1 or with every trial's Sharpe equal, the DSR is `null`;
+  - adding trials (more grid values) never lowers SR₀* when the trials' variance is held fixed;
+  - **calibration.** On 200 seeds of pure-noise grids (zero-mean returns, 20 configurations), the best configuration's DSR exceeds 0.95 in at most 10% of seeds. That bound is loose on purpose: the trials are correlated (§9.1). It is not yet measured, so confirm it with a prototype at the start of Phase 5, and report it if it doesn't hold.
+
+### `test_walk_forward.py` (Phase 6)
+- **Folds.** The fold boundaries match §9.2 for rolling and anchored windows. A final test window shorter than 21 days is dropped, and fewer than 2 folds raise an error with the counts.
+- **No look-ahead in selection.** Perturbing prices after a fold's training window never changes that fold's selection. Assert this on every fold, and also that something later did change.
+- **Stitching.** w*_t equals the chosen configuration's executed weight on every day of its span, including the close before the test window. The stitched excess equals §6.1 applied to w* recomputed in the test, within 1e-12, so switching costs are charged.
+- **Fold ownership.**
+  - `series.fold` matches §9.2: 0 on day b₀ − 1, and `null` before it.
+  - Each fold's `test_sharpe` equals the §8 Sharpe of the stitched excess over its days.
+  - The folds' summed stitched excess equals the total within 1e-12, with each switch cost in the fold being left.
+- **Fixed-grid identity.** With a one-configuration grid, the stitched series equals that configuration's own excess on the same window, except on day b₀ − 1, where the stitched run enters from flat.
+- **Flat fold.** A fold with no eligible configuration has zero weights and a warning.
+- **Not enough data.** Too few days for 2 folds returns 422.
 
 ### `test_metrics.py`
 - **Hand-computed values:**
@@ -897,6 +1249,15 @@ These test `pipeline.run_sensitivity` directly.
   - any R ≤ −1;
   - `block_len` > n/2;
   - a strategy window with no exposure, including a cash-only series whose σ̂ is well above the floor.
+- **Stationary bootstrap (Phase 7):**
+  - every increment is a historical value;
+  - with `ell = np.arange(n, dtype=float)`, each path splits into runs that are contiguous modulo n;
+  - **restart rate.** Over steps t ≥ 1, the share that continue the previous index (+1 modulo n) is within 5 binomial standard errors of (1 − p) + p/n, with p = 1/`block_len`. The p/n term counts new blocks that start, by chance, at the next index.
+    - Don't test the mean run length against `block_len`. Runs are cut off at the horizon, which biases it down to about T / (1 + (T − 1)p). With T = 252 and b = 10 that is 9.655, and the snippet in §10.7 measured 9.655 (verified, numpy 2.5).
+    - With `block_len=1` the continuation share is within 5 SE of 1/n;
+  - chunked and unchunked generation give identical paths when they consume the generator in the same order. Test it with one chunk equal to all paths against the reference;
+  - the same seed's GBM and block-bootstrap outputs are unchanged by adding the third model (§10.4).
+- **Automatic block length (Phase 7).** It equals `arch.bootstrap.optimal_block_length` rounded up and clipped (§10.8), and it is echoed in `block_len_used`.
 
 ### `test_data_loader.py`
 - **Dates.** The requested end date is included (exclusive-`end` handling).
@@ -936,6 +1297,48 @@ These test `pipeline.run_sensitivity` directly.
   - `sizing` is `null` when the overlay is off;
   - trend sensitivity returns `z_entry_values: null` and a one-column Sharpe matrix;
   - on a 756-trading-day range, `/api/backtest` for trend succeeds, while `/api/sensitivity` returns 422 whose `detail` names L = 378.
+- **Phase 5:**
+  - `allow_short=false` with pairs returns 422;
+  - `borrow_bps` outside 0–2,000 returns 422;
+  - `cost_sensitivity`, `calendar`, `rolling_sharpe`/`rolling_beta` and `deflated` validate against the response models.
+- **Phase 6.** `/api/walk-forward` works on the fixture, isn't stored in `backtest_runs`, and rejects `test_days` < 21.
+- **Phase 7:**
+  - a trend_portfolio request with 1 or 13 tickers returns 422, and one with no `vol_target` resolves it to 0.40;
+  - `kalman_delta` sent with `pairs_model="ols"` is ignored and echoed as `null`;
+  - `block_len="auto"` works.
+- **Phase 8 (run history):**
+  - `/api/runs` lists runs newest first and honours `limit`;
+  - `/api/runs/{id}` returns the stored request and metrics, and an unknown id returns 404;
+  - a row stored without `ann_borrow_drag` reads back with it `null`;
+  - `QUANT_OFFLINE=1` turns a cache miss into 503 without calling yfinance. Assert this with the fake network's call counter.
+
+### Frontend unit tests (Vitest)
+Every new pure helper gets tests, as in Phase 3:
+- request building for each new field, including that hidden controls are not sent;
+- URL-state round trips;
+- CSV escaping;
+- log-scale ticks;
+- the cost-sweep and calendar transforms;
+- demo replay lookup.
+
+Keep the Phase 3 mutation check: before each phase ends, inject deliberate bugs into the new helpers and show that every one fails a test.
+
+### Browser tests (Playwright; Phase 8)
+These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never against the network.
+- **Setup.** `playwright.config.ts` uses `webServer` to start two servers:
+  - uvicorn with `QUANT_OFFLINE=1` and a `DATABASE_URL` pointing at a temporary SQLite file that `backend/scripts/seed_e2e.py` has filled with the synthetic market and coverage rows. Synthetic tickers such as `SYNY`, `SYNX` and `SYNT` cover 2012-01-03 to 2019-12-31, and every request ends by then, so every price read is a cache hit;
+  - `vite preview` on a fresh build.
+- **Tests:**
+  - a pairs run renders every panel, with no console errors;
+  - a trend run shows the single-row heatmap;
+  - an uncached ticker shows the API's 503 offline `detail`;
+  - a too-short range shows the sensitivity 422 while the backtest renders;
+  - a blank field blocks the Run with zero requests;
+  - after a run, the history panel lists it and "Load settings" restores the sidebar;
+  - the trades CSV downloads with the right header row;
+  - the URL round-trips the settings without sending a request on load.
+- These tests are outside pytest's 60 s budget (§14).
+- `npm run screenshots` (`frontend/scripts/screenshots.ts`) uses Playwright against a live local API with real data, to regenerate `docs/screenshots/`. It needs the network, so it never runs in CI.
 
 ## 13. Frontend (`/frontend`)
 
@@ -961,8 +1364,18 @@ These test `pipeline.run_sensitivity` directly.
 - Cost bps, execution lag, and risk-free rate (T-bill or a constant).
 - **Vol targeting:** an on/off toggle, the target (annual %), half-life, refresh schedule, and max leverage.
 - Show only the controls that apply to the chosen strategy. Hidden controls are not sent.
-- Monte Carlo settings: paths, horizon, block length, seed and zero drift.
-- Requests are sent only from a **Run** button.
+- Monte Carlo settings: paths, horizon, block length (a number, or "auto" from Phase 7), seed and zero drift.
+- **Phase 5:** borrow fee (bps a year) and a long-only switch. The switch is hidden for pairs.
+- **Phase 6:** walk-forward settings: training days, test days, and rolling or anchored.
+- **Phase 7:**
+  - **Trend portfolio** as a fourth strategy, with a ticker list of 2–12. Its presets are the four trend ETFs, plus a "diversified" set (SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC, VNQ), which the API's calendar trims to the shortest history.
+  - Its vol settings show without an on/off toggle (§5.8). The per-asset target defaults to 40%.
+  - For pairs, a model switch (rolling OLS or Kalman) and δ.
+- Requests are sent only from explicit buttons. **Run** sends the backtest, then sensitivity and Monte Carlo. From Phase 6, **Run walk-forward** in its panel sends that request, because the walk-forward reruns the whole grid. The run-history list (Phase 8) loads when its panel is opened and reloads after each successful Run.
+- **URL state (Phase 8).**
+  - When Run is pressed, the settings that differ from the defaults are written to the query string with `history.replaceState`.
+  - On load, the query string fills the sidebar but sends nothing. Each invalid or unknown parameter is ignored with a notice naming it.
+  - The URL holds settings only, never results.
 
 ### Views
 1. **KPI grid**, with an IS | OOS | Full toggle:
@@ -971,33 +1384,93 @@ These test `pipeline.run_sensitivity` directly.
    - benchmark figures alongside;
    - pairs diagnostics: IS and OOS coint p-values and half-life;
    - VaR95 and CVaR95 from the latest Monte Carlo run;
+   - from Phase 5, the break-even cost (§8.1) next to the request's cost, and the borrow drag;
    - `null` shows as "—".
 2. **Equity and drawdown.** Strategy vs benchmark on top and underwater drawdown below, synchronized with `syncId`. The OOS region is shaded and the split date is marked.
    - Every synchronized chart, including the signal panel, uses the same `series` arrays, so their indexes and dates line up.
    - Equity values are null before the baseline and render as a gap. Don't drop those rows: that would shift the indexes.
+   - **Linear | Log toggle (Phase 8)** for the equity axis.
+     - Log ticks fall at 1, 2 and 5 × 10^k dollars inside the range.
+     - The toggle is disabled, with a tooltip, on a ruined run, whose equity reaches 0.
 3. **Signal panel.** The score, with entry/exit markers at **signal dates**.
    - Mean reversion and pairs: z, with ±z_entry and ±z_exit lines.
    - Trend: the trailing excess return as a step line, with a zero line.
-   - Pairs: also the rolling β and `beta_used`.
+   - Pairs: also the rolling β and `beta_used` (the filtered β with the Kalman model).
    - Below the score, a small `gross_exposure` chart shows leverage over time, plus the annualized vol forecast when the overlay is on.
-4. **Trades table**, sortable, built from `trades`.
+   - **Trend portfolio (Phase 7):**
+     - one small score chart per leg (`series.legs`), each with its own markers (trades filtered by `ticker`);
+     - a chart of the legs' executed weights;
+     - the gross-exposure chart;
+     - a vol-forecast chart with one line per leg (`series.legs[i].vol_forecast`) and the per-asset target as a dashed line. `sizing` is always present for this strategy, but the top-level `series.vol_forecast` is `null`, so this chart replaces the single-asset vol-forecast line.
+
+     All of these share the `syncId`.
+4. **Trades table**, sortable, built from `trades`, with a ticker column for the trend portfolio.
 5. **Sensitivity heatmap** (a CSS grid):
    - a diverging colour scale centred on a Sharpe of 0;
    - the request's own cell outlined;
    - "N configs tested" and the window shown;
-   - for trend, a single row over L.
+   - for trend and the trend portfolio, a single row over L;
+   - from Phase 5: the deflated Sharpe of the request's cell and of the best cell, the number of trials, and the note that the DSR can't count trials made outside this grid (§9.1).
 6. **Monte Carlo:**
-   - **Fan chart:** range Areas for p5–p95 and p25–p75 (a `dataKey` that returns `[low, high]`), a p50 line, and 20 thin sample paths, with a GBM / bootstrap toggle.
+   - **Fan chart:** range Areas for p5–p95 and p25–p75 (a `dataKey` that returns `[low, high]`), a p50 line, and 20 thin sample paths, with a GBM / bootstrap toggle. From Phase 7 the toggle also has the stationary bootstrap.
    - **Terminal-return histogram** on a numeric x-axis, with a red `ReferenceLine` at −VaR95.
-   - A table comparing GBM simulated, GBM closed form and bootstrap.
+   - A table comparing GBM simulated, GBM closed form and bootstrap; from Phase 7, plus the stationary bootstrap and the block lengths used.
    - The seed and elapsed time.
 7. **Warnings banner** listing the API's `warnings`.
+8. **Cost sweep (Phase 5, §8.1).**
+   - Sharpe against one-way cost, for the segment the KPI toggle selects.
+   - The request's own cost is marked, along with a vertical line at the break-even cost.
+   - When the break-even is `null`, the panel says why: no trades, or losing before costs.
+   - A note states that positions are held fixed across costs.
+9. **Rolling statistics (Phase 5, §8.2).** The 1-year rolling Sharpe, with a zero line, and the rolling beta to SPY. These are synchronized charts on the shared `series` rows.
+10. **Calendar returns (Phase 5, §8.2).**
+    - A years × months CSS grid of monthly returns, with the §13 diverging colour scale centred on 0. Its bound is the largest |monthly return|, but at least 2%.
+    - Partial months are hatched.
+    - A final column shows each year's strategy and benchmark returns.
+11. **Walk-forward (Phase 6, §9.2):**
+    - stitched equity against the fixed-parameter run and the benchmark, with alternate test folds shaded;
+    - a fold table: training window, chosen configuration, and training and test Sharpe;
+    - a metrics table (walk-forward / fixed / benchmark);
+    - "n distinct configurations chosen";
+    - a note that the walk-forward track record is entirely out-of-sample, with each fold's parameters chosen before its test window.
+12. **Run history (Phase 8, §11.4):**
+    - a table of stored runs with their key metrics;
+    - "Load settings", which fills the sidebar from a run's resolved request without running it;
+    - selection of up to 4 runs for a side-by-side metrics comparison (IS | OOS | Full);
+    - a flag on runs from an older engine version.
+13. **CSV export (Phase 8).** Buttons download:
+    - the trades table;
+    - the `series` arrays (one row per date);
+    - the calendar returns.
+
+    The CSVs are built in the browser by one pure helper:
+    - RFC 4180 quoting, with CRLF line endings;
+    - numbers written at full precision (`String(x)`), not as formatted;
+    - nulls written as empty fields;
+    - file names `{strategy}-{tickers}-{start}-{end}-{table}.csv`.
 
 ### Behaviour and tests
 - Charts use `isAnimationActive={false}` and `dot={false}`; there are about 4,000 points per series.
 - Show loading, empty and error states. Error states render the API's `detail`.
-- An assumptions footer states the cost (one-way bps), the execution lag, the rf source, the daily-rebalancing assumption and, when on, the vol-targeting settings.
-- Use Vitest for pure helpers such as formatters and null handling.
+- An assumptions footer states the cost (one-way bps), the execution lag, the rf source, the daily-rebalancing assumption and, when on, the vol-targeting settings. From Phase 5 it also states the borrow fee and long-only setting, and from Phase 7 the pairs model.
+- Use Vitest for pure helpers such as formatters and null handling, and Playwright for the browser tests (§12).
+
+### Static demo (Phase 9)
+A read-only build of the dashboard that runs without a backend. It is deployed to GitHub Pages so reviewers can see the project without installing it.
+- **Build.** `VITE_DEMO=1 npm run build`, with Vite's `base` set to the repository path, e.g. `/quant-engine/`.
+- **Replay.** In demo mode, `api.ts` swaps its fetch wrappers for a replay module. It looks up `public/demo/manifest.json`, which maps a canonical request key to a recorded response file. The key is the request's JSON with sorted keys.
+  - A request that isn't recorded shows "This configuration isn't in the demo. Run the project locally for live data."
+  - Run history is hidden in demo mode.
+- **Scenarios.** The sidebar offers only the recorded scenarios, through a scenario picker, and the other inputs are read-only. The scenarios are:
+  - pairs KO/PEP, XOM/CVX, GOOGL/GOOG and NVDA/AMD;
+  - mean reversion on KO;
+  - trend on SPY, with the vol target off and on;
+  - the trend portfolio of the four trend ETFs.
+
+  Each scenario includes its sensitivity, walk-forward and Monte Carlo (seed 42).
+- **Banner.** It reads: "Demo: results recorded on {date} from Yahoo data through {end}. Run locally for live data."
+- **Recording.** `backend/scripts/record_demo.py` calls the API in-process (FastAPI's `TestClient`) on the local price cache for the fixed scenario list, with fixed dates and seed, and writes the JSON files and the manifest. The total size must stay under 10 MB: report the size, and if it's over, ask before trimming scenarios.
+- **Data licence. Ask before the first deployment.** Yahoo's terms restrict redistributing its data. The recorded responses hold derived series, and `benchmark_equity` is a rescaled adjusted price. Whether publishing them is acceptable is the user's decision. Until the user says yes, `pages.yml` exists but its deploy job doesn't run.
 
 ## 14. Non-Functional Requirements
 - **Determinism.** The same request on the same cached data gives an identical backtest. Monte Carlo output is identical for a given seed.
@@ -1008,10 +1481,17 @@ These test `pipeline.run_sensitivity` directly.
   | 15-year pairs backtest, warm cache | < 300 ms |
   | Default sensitivity grid | < 5 s |
   | Default Monte Carlo (10k × 252, both models) | < 1 s |
+  | Default Monte Carlo with the stationary bootstrap (Phase 7, three models) | < 1.5 s |
+  | Default walk-forward, 15-year pairs (Phase 6) | < 8 s |
+  | 15-year Kalman pairs backtest, warm cache (Phase 7) | < 500 ms |
 
-  For reference, the review prototype measured about 128 ms for GBM and 106 ms for the bootstrap at this size, including bands.
-- **Memory.** Monte Carlo peaks at about 200 MB at the API caps.
-- **Tests.** No network, and the full suite finishes in under 60 s.
+  For reference, the review prototype measured about 128 ms for GBM and 106 ms for the bootstrap at this size, including bands. The Phase 6 and 7 targets are estimates, not measurements.
+- **Backtest latency (Phase 4).** The Phase 2 check took about 0.47 s end to end for KO/PEP. About 132 ms of that was the two Engle–Granger tests.
+  - `bench.py` reports the pairs backtest broken down by stage: loading, `run_strategy`, diagnostics, report and serialization. It also reports the backtest repeated with only L or z_entry changed.
+  - If the target is missed, add a **diagnostics cache** in the API layer, keyed by the tickers, the IS and OOS diagnostic windows, and a SHA-256 of the two adjusted-close arrays over those windows. Keep at most 256 entries, least recently used first out. `stats.py` stays pure.
+  - The diagnostics don't depend on L, z or costs, so the cache speeds up parameter iteration, which is the common case. It can't speed up the first request on new data, and the README must report both numbers.
+- **Memory.** Monte Carlo peaks at about 200 MB at the API caps, including the stationary bootstrap's per-chunk temporaries (§10.7).
+- **Tests.** No network, and the pytest suite finishes in under 60 s. The browser tests (§12) are separate and have no such budget.
 
 ## 15. Documentation
 **`docs/METHODOLOGY.md`** contains:
@@ -1023,12 +1503,27 @@ These test `pipeline.run_sensitivity` directly.
   - vol targeting: the EWMA forecast, the half-life choice, the leverage cap, the refresh trade-off, and financing at rf. Cite Moreira & Muir (2017) and Harvey et al. (2018) on why constant-vol sizing can raise risk-adjusted returns;
   - GBM drift; the block bootstrap; closed-form VaR/CVaR;
   - the IS/OOS protocol.
+  - **From Phase 5:**
+    - the linearity of excess return in cost, and the break-even formula;
+    - the borrow fee and the long-only clip;
+    - rolling and calendar statistics;
+    - the probabilistic and deflated Sharpe ratios (Bailey & López de Prado 2012, 2014), including why daily Sharpe ratios, skewness and kurtosis enter.
+  - **From Phase 6:** the walk-forward protocol: causal selection, stitching by executed weights, switching costs, and why it is the remedy for OOS reuse.
+  - **From Phase 7:**
+    - the Kalman model (Chan 2013): the state-space form, the OLS initialization and its δ = 0 identity, the innovation z-score, and the Joseph-form update;
+    - the multi-asset trend portfolio's equal risk budgets (Moskowitz, Ooi & Pedersen 2012);
+    - the stationary bootstrap (Politis & Romano 1994);
+    - automatic block length (Politis & White 2004; Patton, Politis & White 2009).
 - **Limitations:**
   - survivorship and selection bias (pairs chosen with hindsight);
-  - close-price fills, a fixed bps cost, no market impact, and no borrow fees or short-sale constraints;
+  - close-price fills, a fixed bps cost and no market impact. From Phase 5, a flat borrow fee with no hard-to-borrow tiers or recalls;
+  - the cost sweep holds positions fixed, so it ignores the adaptation a real trader would make at higher costs;
   - exits use the rolling z while the frozen-β spread is held;
-  - multiple testing across the grid (configurations are counted, but there is no deflated Sharpe);
-  - iterating parameters while watching OOS results turns OOS into IS;
+  - multiple testing across the grid. From Phase 5 the deflated Sharpe corrects for the grid's own trials, but not for trials made outside it, and it treats correlated trials as independent;
+  - iterating parameters while watching OOS results turns OOS into IS. Walk-forward (Phase 6) removes this for its own selection, but choosing the grid, the window lengths or the strategy after seeing walk-forward results reintroduces it;
+  - walk-forward selection chases noisy training Sharpe ratios, so a high `n_distinct_selected` means parameter instability, not adaptivity;
+  - the Kalman δ and its initialization window are themselves tuned parameters;
+  - the trend portfolio uses a handful of ETFs, not the dozens of futures in the published research, and its calendar starts at its youngest ETF;
   - the Sharpe CI assumes iid returns;
   - GBM assumes iid normal log returns;
   - the bootstrap assumes stationarity and can't exceed historical extremes;
@@ -1037,6 +1532,7 @@ These test `pipeline.run_sensitivity` directly.
   - the vol forecast lags sudden spikes, so realized vol overshoots the target in crashes;
   - vol targeting sizes up when measured vol falls, including during stale-price runs (capped at `max_leverage`);
   - leverage is financed at the T-bill rate with no borrowing spread;
+  - the static demo shows results recorded on one date, which go stale as markets move;
   - Yahoo data quality.
 - **Deviations:** any approved departures from this spec, with reasons.
 
@@ -1044,7 +1540,10 @@ These test `pipeline.run_sensitivity` directly.
 - setup and run commands that work in PowerShell;
 - how to run the tests;
 - screenshots;
-- benchmark numbers copied from `scripts/bench.py` output, with the hardware stated.
+- benchmark numbers copied from `scripts/bench.py` output, with the hardware stated;
+- from Phase 9, a link to the static demo and the date its results were recorded.
+
+Each of Phases 5–9 updates METHODOLOGY.md and the README for what it adds. Phase 4's "every formula is justified" holds again at the end of each phase.
 
 ## 16. Phases and Definition of Done
 Stop at the end of every phase (§0, rule 5).
@@ -1055,14 +1554,16 @@ Stop at the end of every phase (§0, rule 5).
 | 1. Core math | `pipeline` (`run_strategy`, `run_sensitivity`), `strategies` (A, B, C), `sizing`, `backtester` (with `resolve_split`), `metrics`, `stats`, `monte_carlo` and their test files; synthetic data only | those tests pass, including the perturbation (all strategies, overlay on and off), reconciliation, vol-tracking and closed-form tests |
 | 2. Data + API | models, cache, loader, endpoints, serialization, `test_data_loader`, `test_api` | the full suite passes, and one real KO/PEP backtest via `/docs` succeeds (network allowed in this check only) |
 | 3. Frontend | §13 | lint, Vitest and build pass; a manual run against the local API; screenshots |
-| 4. Docs + bench | §15, `scripts/bench.py` | every formula in this file is justified in METHODOLOGY.md; README numbers come from bench output |
+| 4. Docs + bench | §15, `scripts/bench.py`, and the diagnostics cache only if the bench misses its target (§14) | every formula in this file is justified in METHODOLOGY.md; README numbers come from bench output |
+| 5. Costs and robustness metrics | borrow fee and long-only switch (§6.1, §5.9), cost sweep and break-even (§8.1), rolling and calendar statistics (§8.2), deflated Sharpe (§9.1); API, UI views 8–10, KPI additions, tests | first, a prototype confirms the DSR calibration bound (§12); the full suite passes, including the cost-sweep linearity test and the extended perturbation and reconciliation tests; with `borrow_bps=0` every earlier output is unchanged; a manual run against the local API; METHODOLOGY and README updated |
+| 6. Walk-forward | `run_walk_forward` (§9.2), `POST /api/walk-forward`, UI view 11, `test_walk_forward.py` | the selection perturbation and stitching identities pass; the default 15-year pairs walk-forward is benchmarked against §14; a manual run; docs updated |
+| 7. More models | Kalman pairs (§5.7), trend portfolio (§5.8, §7.4), stationary bootstrap and automatic block length (§10.7–10.8); API and UI | first, check `arch` (§10.8); the Kalman δ = 0 identity, the per-leg reconciliation and the stationary-bootstrap tests pass; memory stays within §14 at the API caps; a manual run with the diversified preset; docs updated |
+| 8. Dashboard and engineering | run history (§11.4), log scale, CSV export, URL state, offline mode (§4.3), `seed_e2e.py`, Playwright browser tests in CI, `npm run screenshots` | the browser tests pass locally in PowerShell and in CI; screenshots regenerated with the script; docs updated |
+| 9. Static demo | demo build and replay (§13, "Static demo"), `record_demo.py`, `pages.yml` | the demo build works from a local static server with no backend; recorded data is under 10 MB; deployment waits for the user's answer on the data licence (§13) |
+
+Phases 5–9 are independent enough to reorder, except that Phase 9 records the views the earlier phases add, so it comes last.
 
 **Stretch goals** (only if asked):
 - cross-sectional momentum across a stock universe (needs a survivorship-bias-aware universe);
-- a multi-asset time-series momentum portfolio;
-- Kalman-filter hedge ratio;
-- walk-forward re-optimization;
-- deflated Sharpe ratio;
-- stationary bootstrap;
 - stop-loss and time-stop rules;
 - GARCH Monte Carlo.
