@@ -480,3 +480,12 @@ As Phase 0, item 3 planned, `npm test` is now plain `vitest run`.
    - The Phase 5–9 justifications and limitations that §15 lists come with those phases.
    - The figures marked *(engine)* were measured on the app's own price cache, `backend/quant.db`, read-only and without storing any runs. Each comes with the request or script that reproduces it.
    - The trend and vol-targeting tables reproduce the review prototype's figures in §5.5 and §5.6 to within rounding.
+
+### After Phase 4 (approved 2026-10-16)
+1. **The benchmark can be hidden (addition to §13, views 1–2).**
+   - A "Buy & hold {ticker}" toggle sits in the header of the Performance panel and of the Equity and drawdown panel.
+   - Both buttons share one state. It starts on, and it is kept across runs.
+   - Turning it off hides the benchmark line and legend entry in the equity chart. It also hides the grey "B&H" figures under the KPI tiles, including realized vol in the vol-targeting group.
+   - When the line is hidden, the equity axis rescales to the strategy alone. That makes a low-volatility strategy readable next to a fast-rising benchmark.
+   - It only changes what is shown. The request, the response and `benchmark_metrics` are unchanged.
+   - It was requested by the user and checked in the browser on a KO/PEP pairs run.

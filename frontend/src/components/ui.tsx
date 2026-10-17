@@ -65,6 +65,26 @@ export function Segmented<T extends string>(props: {
   )
 }
 
+/** An on/off button. Both views that show the benchmark share one of these states (§13). */
+export function Toggle(props: { pressed: boolean; onChange: (pressed: boolean) => void; children: ReactNode; title?: string }) {
+  return (
+    <button
+      type="button"
+      title={props.title}
+      aria-pressed={props.pressed}
+      onClick={() => props.onChange(!props.pressed)}
+      className={
+        'rounded border px-2 py-0.5 text-xs whitespace-nowrap ' +
+        (props.pressed
+          ? 'border-slate-500 bg-slate-500/20 text-slate-200'
+          : 'border-neutral-700 text-neutral-500 hover:text-neutral-200')
+      }
+    >
+      {props.pressed ? '☑' : '☐'} {props.children}
+    </button>
+  )
+}
+
 export function Loading(props: { what: string }) {
   return <p className="animate-pulse text-sm text-neutral-400">Running {props.what}…</p>
 }

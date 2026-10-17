@@ -84,6 +84,7 @@ export default function App() {
   const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: 'idle' })
   const [sensitivity, setSensitivity] = useState<Async<SensitivityResponse>>({ status: 'idle' })
   const [monteCarlo, setMonteCarlo] = useState<Async<MonteCarloResponse>>({ status: 'idle' })
+  const [showBenchmark, setShowBenchmark] = useState(true) // kept across runs
   const inFlight = useRef<AbortController | null>(null)
 
   async function run() {
@@ -170,8 +171,14 @@ export default function App() {
       <>
         <RunHeader bt={bt} />
         <Warnings warnings={bt.warnings} />
-        {guard('Performance', <KpiGrid backtest={bt} monteCarlo={monteCarlo} />)}
-        {guard('Equity', <EquityPanel rows={view.rows} firstOos={view.firstOos} benchmark={view.benchmark} />)}
+        {guard('Performance', <KpiGrid backtest={bt} monteCarlo={monteCarlo} showBenchmark={showBenchmark} onShowBenchmark={setShowBenchmark} />)}
+        {guard('Equity', <EquityPanel
+            rows={view.rows}
+            firstOos={view.firstOos}
+            benchmark={view.benchmark}
+            showBenchmark={showBenchmark}
+            onShowBenchmark={setShowBenchmark}
+          />)}
         {guard(
           'Signal',
           <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />,

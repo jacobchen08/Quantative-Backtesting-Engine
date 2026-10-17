@@ -17,7 +17,7 @@ import {
 import type { Async } from '../state'
 import { benchmarkName, segmentRange } from '../transform'
 import type { BacktestResponse, Metrics, MonteCarloResponse, SegmentKey } from '../types'
-import { Panel, Segmented } from './ui'
+import { Panel, Segmented, Toggle } from './ui'
 
 type Kpi = {
   label: string
@@ -92,8 +92,13 @@ function riskValue(mc: Async<MonteCarloResponse>, tile: (typeof RISK_TILES)[numb
   return mc.status === 'done' ? fmtPct(mc.data[tile.model][tile.key]) : DASH
 }
 
-export const KpiGrid = memo(function KpiGrid(props: { backtest: BacktestResponse; monteCarlo: Async<MonteCarloResponse> }) {
-  const { backtest: bt, monteCarlo: mc } = props
+export const KpiGrid = memo(function KpiGrid(props: {
+  backtest: BacktestResponse
+  monteCarlo: Async<MonteCarloResponse>
+  showBenchmark: boolean
+  onShowBenchmark: (show: boolean) => void
+}) {
+  const { backtest: bt, monteCarlo: mc, showBenchmark } = props
   const [segment, setSegment] = useState<SegmentKey>('full')
   const m = bt.metrics[segment]
   const b = bt.benchmark_metrics[segment]
@@ -110,7 +115,14 @@ export const KpiGrid = memo(function KpiGrid(props: { backtest: BacktestResponse
           {m && ` · ${fmtInt(m.n_days)} evaluated days`} · benchmark: buy &amp; hold {bench}
         </>
       }
-      actions={<Segmented label="Segment" value={segment} options={SEGMENTS} onChange={setSegment} />}
+      actions={
+        <div className="flex items-center gap-2">
+          <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the KPI tiles and the chart">
+            Buy &amp; hold {bench}
+          </Toggle>
+          <Segmented label="Segment" value={segment} options={SEGMENTS} onChange={setSegment} />
+        </div>
+      }
     >
       <div className="space-y-4">
         {m === null || b === null ? (
@@ -118,14 +130,14 @@ export const KpiGrid = memo(function KpiGrid(props: { backtest: BacktestResponse
             No out-of-sample segment: the run was ruined in-sample on {bt.ruin_date ?? DASH}, before the split.
           </p>
         ) : (
-          <Group title="Strategy" note={<span className="text-slate-400">grey: buy &amp; hold {bench}</span>}>
+          <Group title="Strategy" note={showBenchmark && <span className="text-slate-400">grey: buy &amp; hold {bench}</span>}>
             {KPIS.map((k) => (
               <Tile
                 key={k.label}
                 label={k.label}
                 value={k.value(m)}
                 sub={k.sub?.(m)}
-                bench={k.bench === false ? undefined : `B&H ${k.value(b)}`}
+                bench={!showBenchmark || k.bench === false ? undefined : `B&H ${k.value(b)}`}
                 title={k.title}
               />
             ))}
@@ -138,7 +150,7 @@ export const KpiGrid = memo(function KpiGrid(props: { backtest: BacktestResponse
             <Tile
               label="Realized vol"
               value={m ? fmtPct(m.ann_vol) : DASH}
-              bench={b ? `B&H ${fmtPct(b.ann_vol)}` : undefined}
+              bench={showBenchmark && b ? `B&H ${fmtPct(b.ann_vol)}` : undefined}
               title="ann_vol of the selected segment"
             />
             <Tile

@@ -19,7 +19,7 @@ import { fmtMoney, fmtMonth, fmtMultiple, fmtNum, fmtPct, fmtRate } from '../for
 import { niceTicks, type SeriesRow } from '../transform'
 import { AXIS_TICK, BACKTEST_SYNC_ID, CHART_MARGIN, COLORS, TOOLTIP_STYLE } from '../theme'
 import type { BacktestResponse } from '../types'
-import { Panel } from './ui'
+import { Panel, Toggle } from './ui'
 
 const Y_WIDTH = 64 // the same on every synchronized chart, so their x positions line up
 
@@ -97,17 +97,27 @@ export const EquityPanel = memo(function EquityPanel(props: {
   rows: SeriesRow[]
   firstOos: number
   benchmark: string
+  showBenchmark: boolean
+  onShowBenchmark: (show: boolean) => void
 }) {
-  const { rows, firstOos } = props
+  const { rows, firstOos, showBenchmark } = props
   // Round ticks down to the deepest drawdown (at least -1%, so a run that never lost still has an axis).
   const ddFloor = useMemo(() => Math.min(-0.01, ...rows.map((r) => r.drawdown ?? 0)), [rows])
   return (
-    <Panel title="Equity and drawdown" subtitle="Gaps before the baseline day are intentional: the arrays start before trading does.">
+    <Panel
+      title="Equity and drawdown"
+      subtitle="Gaps before the baseline day are intentional: the arrays start before trading does."
+      actions={
+        <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the chart and the KPI tiles">
+          Buy &amp; hold {props.benchmark}
+        </Toggle>
+      }
+    >
       <ChartTitle
         legend={
           <>
             <Key color={COLORS.strategy}>Strategy</Key>
-            <Key color={COLORS.benchmark}>Buy &amp; hold {props.benchmark}</Key>
+            {showBenchmark && <Key color={COLORS.benchmark}>Buy &amp; hold {props.benchmark}</Key>}
             <Key color={COLORS.oos} glyph="▮">OOS</Key>
           </>
         }
@@ -128,14 +138,16 @@ export const EquityPanel = memo(function EquityPanel(props: {
         <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={moneyTip} />
         {oosMarks(rows, firstOos, true)}
         <Line dataKey="equity" name="Strategy" stroke={COLORS.strategy} strokeWidth={1.5} dot={false} isAnimationActive={false} />
-        <Line
-          dataKey="benchmark"
-          name={`Buy & hold ${props.benchmark}`}
-          stroke={COLORS.benchmark}
-          strokeWidth={1}
-          dot={false}
-          isAnimationActive={false}
-        />
+        {showBenchmark && (
+          <Line
+            dataKey="benchmark"
+            name={`Buy & hold ${props.benchmark}`}
+            stroke={COLORS.benchmark}
+            strokeWidth={1}
+            dot={false}
+            isAnimationActive={false}
+          />
+        )}
       </LineChart>
 
       <ChartTitle>Drawdown</ChartTitle>
