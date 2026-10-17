@@ -1,7 +1,9 @@
-"""Engle–Granger cointegration test, static OLS and half-life for pairs (§5.4). Pure (§0, rule 8).
+"""Pairs diagnostics (§5.4) and the deflated Sharpe ratio (§9.1). Pure (§0, rule 8).
 
-All inputs are log prices on the run calendar. These diagnostics are only displayed; no
-trading decision uses them.
+Engle–Granger test, static OLS and half-life: the inputs are log prices on the run calendar,
+and the results are only displayed; no trading decision uses them.
+Deflated Sharpe ratio: the inputs are daily excess returns and daily (not annualized) Sharpe
+ratios.
 """
 
 from __future__ import annotations
@@ -13,10 +15,14 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+from scipy.stats import kurtosis, norm, skew
 from statsmodels.tools.sm_exceptions import CollinearityWarning
 from statsmodels.tsa.stattools import coint
 
 VAR_FLOOR = 1e-12  # same floor as the rolling beta (§5.3)
+EULER_GAMMA = 0.5772156649  # the Euler–Mascheroni constant, to the digits §9.1 gives
+SHARPE_VAR_FLOOR = 1e-24  # §9.1: below this, the trials' Sharpe ratios are all the same
+STD_FLOOR = 1e-12  # the §8 Sharpe is undefined below this std
 
 
 @dataclass(frozen=True)
@@ -112,3 +118,61 @@ def pairs_diagnostics(
         collinear_is=eg_is.collinear,
         collinear_oos=eg_oos.collinear,
     )
+
+
+# ---------------------------------------------------------------- deflated Sharpe ratio (§9.1)
+
+
+def expected_max_sharpe(sharpes: object) -> float | None:
+    """SR0*: the Sharpe ratio the best of N skill-less trials is expected to show (§9.1).
+
+    SR0* = sqrt(V) * [(1 - g) * Phi^-1(1 - 1/N) + g * Phi^-1(1 - 1/(N e))], where V is the
+    variance across trials of their daily Sharpe ratios (ddof=1) and g is the Euler–Mascheroni
+    constant (Bailey & López de Prado 2014).
+
+    Args:
+        sharpes: the daily (not annualized) Sharpe ratio of each trial with a defined Sharpe.
+
+    Returns:
+        SR0* as a daily Sharpe ratio, or None when N < 2 or V < 1e-24.
+    """
+    sr = np.asarray(sharpes, dtype=float)
+    n = sr.size
+    if n < 2:
+        return None
+    v = float(np.var(sr, ddof=1))
+    if not v >= SHARPE_VAR_FLOOR:
+        return None
+    factor = (1 - EULER_GAMMA) * norm.ppf(1 - 1 / n) + EULER_GAMMA * norm.ppf(1 - 1 / (n * math.e))
+    return math.sqrt(v) * float(factor)
+
+
+def probabilistic_sharpe(excess: object, sr_star: float) -> float | None:
+    """PSR(SR*): the probability that the true Sharpe ratio exceeds sr_star (§9.1).
+
+    PSR = Phi((SR - SR*) sqrt(n - 1) / sqrt(1 - g3 SR + (g4 - 1) / 4 SR^2)) (Bailey & López de
+    Prado 2012), where SR is the daily Sharpe ratio of the n daily excess returns, g3 their
+    sample skewness and g4 their sample (non-excess) kurtosis, both bias-corrected.
+
+    Args:
+        excess: daily excess returns of one configuration.
+        sr_star: the benchmark Sharpe ratio, daily.
+
+    Returns:
+        The probability, or None when the Sharpe ratio is undefined (n < 2 or std < 1e-12) or
+        the term under the square root is <= 0. The caller handles the §8 exposure rule.
+    """
+    x = np.asarray(excess, dtype=float)
+    n = x.size
+    if n < 2:
+        return None
+    sd = float(x.std(ddof=1))
+    if not sd >= STD_FLOOR:
+        return None
+    sr = float(x.mean()) / sd
+    g3 = float(skew(x, bias=False))
+    g4 = float(kurtosis(x, fisher=False, bias=False))
+    term = 1 - g3 * sr + (g4 - 1) / 4 * sr**2
+    if not term > 0:  # also catches a NaN moment
+        return None
+    return float(norm.cdf((sr - sr_star) * math.sqrt(n - 1) / math.sqrt(term)))

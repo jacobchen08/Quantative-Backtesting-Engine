@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   assumptionLines,
   benchmarkName,
+  calendarGrid,
+  costSweepView,
   divergingColor,
   fanRows,
   firstOosIndex,
@@ -15,7 +17,15 @@ import {
   seriesRows,
   sortTrades,
 } from './transform'
-import type { ModelResult, ResolvedBacktestRun, SensitivityResponse, Series, Trade } from './types'
+import type {
+  CalendarReturns,
+  CostSensitivity,
+  ModelResult,
+  ResolvedBacktestRun,
+  SensitivityResponse,
+  Series,
+  Trade,
+} from './types'
 
 // Six days from s0: two warm-up days with no equity yet, the baseline on day 2, then three
 // evaluated days; the split falls on day 4.
@@ -33,6 +43,8 @@ function makeSeries(overrides: Partial<Series> = {}): Series {
     beta_used: null,
     vol_forecast: null,
     is_oos: [false, false, false, false, true, true],
+    rolling_sharpe: [null, null, null, null, 0.8, 0.75],
+    rolling_beta: [null, null, null, null, 0.1, 0.12],
     ...overrides,
   }
 }
@@ -65,6 +77,8 @@ describe('seriesRows: the shared rows of every synchronized chart (§13)', () =>
     expect(rows.map((r) => r.score)).toEqual(series.score)
     expect(rows.map((r) => r.oos)).toEqual(series.is_oos)
     expect(rows.map((r) => r.exposure)).toEqual(series.gross_exposure)
+    expect(rows.map((r) => r.rollingSharpe)).toEqual(series.rolling_sharpe)
+    expect(rows.map((r) => r.rollingBeta)).toEqual(series.rolling_beta)
   })
 
   it('fills pairs and overlay series when present, null otherwise', () => {
@@ -151,7 +165,10 @@ describe('labels', () => {
 
   it('lists the assumptions the API actually used (§13)', () => {
     const resolved = {
+      strategy: 'mean_reversion',
       cost_bps: 10,
+      borrow_bps: 0,
+      allow_short: true,
       execution_lag: 1,
       rf_source: '13-week T-bill (^IRX)',
       vol_target: null,
@@ -161,6 +178,8 @@ describe('labels', () => {
     } as ResolvedBacktestRun
     expect(assumptionLines(resolved)).toEqual([
       'Costs: 10 bps one-way, per leg, on traded notional',
+      'Borrow fee: none; short-sale proceeds earn the risk-free rate',
+      'Shorting: allowed',
       'Execution lag: 1 day (fills at the next close)',
       'Risk-free rate: 13-week T-bill (^IRX); idle cash and short-sale proceeds earn it',
       'Rebalancing: daily, to target weights; turnover from price drift is ignored',
@@ -170,6 +189,13 @@ describe('labels', () => {
     expect(assumptionLines(sized).at(-1)).toBe(
       'Vol targeting: 10% annual target, 42-day EWMA half-life, weekly refresh, 2.0× max leverage',
     )
+    const longOnly = assumptionLines({ ...resolved, borrow_bps: 150, allow_short: false })
+    expect(longOnly.slice(1, 3)).toEqual([
+      'Borrow fee: 150 bps a year on short notional, charged daily',
+      'Long only: short signals are held flat',
+    ])
+    const pairs = assumptionLines({ ...resolved, strategy: 'pairs' })
+    expect(pairs[2]).toBe('Shorting: required (a pair always holds a short leg)')
   })
 })
 
@@ -215,6 +241,7 @@ describe('sensitivity heatmap (§9, §13)', () => {
     n_configs_tested: 4,
     window: { start: '2015-06-01', end: '2022-08-05' },
     selected: { L: 60, z_entry: 2.0 },
+    deflated: { n_trials: 3, sr0_star: 0.9, selected_dsr: 0.6, best: { L: 60, z_entry: 2.0, sharpe: 1.2, dsr: 0.6 } },
   }
 
   it('lays out rows = L and columns = z entry, outlining the request’s own cell', () => {
@@ -234,6 +261,7 @@ describe('sensitivity heatmap (§9, §13)', () => {
       n_configs_tested: 5,
       window: { start: '2010-02-01', end: '2020-06-01' },
       selected: { L: 252, z_entry: null },
+      deflated: { n_trials: 4, sr0_star: 0.2, selected_dsr: 0.7, best: { L: 252, z_entry: null, sharpe: 0.35, dsr: 0.7 } },
     }
     const layout = heatmapLayout(trend)
     expect(layout.cells).toHaveLength(1)
@@ -315,5 +343,89 @@ describe('Monte Carlo rows', () => {
     expect(niceTicks(0, 21)).toEqual([0, 5, 10, 15, 20])
     expect(niceTicks(1, 1)).toEqual([1])
     for (const t of niceTicks(-0.0071, 0.0089)) expect(Object.is(t, -0)).toBe(false)
+  })
+})
+
+describe('cost sweep (§8.1)', () => {
+  const sweep = (breakEven: number | null): CostSensitivity => ({
+    cost_bps: [0, 2, 5, 10, 20, 50, 100],
+    sharpe: {
+      is: [1.1, 1.0, 0.9, 0.7, 0.4, -0.5, null],
+      oos: null,
+      full: [0.8, 0.75, 0.65, 0.5, 0.2, -0.6, -1.9],
+    },
+    break_even_bps: { is: 30, oos: null, full: breakEven },
+  })
+
+  it('pairs each cost with the selected segment’s Sharpe, keeping nulls', () => {
+    const view = costSweepView(sweep(28), 'is', 2.5)
+    expect(view.rows).toEqual([
+      { bps: 0, sharpe: 1.1 },
+      { bps: 2, sharpe: 1.0 },
+      { bps: 5, sharpe: 0.9 },
+      { bps: 10, sharpe: 0.7 },
+      { bps: 20, sharpe: 0.4 },
+      { bps: 50, sharpe: -0.5 },
+      { bps: 100, sharpe: null }, // ruined at that cost
+    ])
+    expect(view.breakEven).toBe(30)
+    expect(costSweepView(sweep(28), 'full', 2.5).rows.map((r) => r.sharpe)).toEqual(sweep(28).sharpe.full)
+    expect(costSweepView(sweep(28), 'oos', 2.5).rows.every((r) => r.sharpe === null)).toBe(true)
+  })
+
+  it('keeps the grid’s axis when the break-even is inside it', () => {
+    expect(costSweepView(sweep(28), 'full', 2.5)).toMatchObject({ breakEven: 28, domainMax: 100, offChart: false })
+  })
+
+  it('stretches the axis to a break-even up to 4× beyond the grid, and reports one further out in words', () => {
+    expect(costSweepView(sweep(250), 'full', 2.5)).toMatchObject({ domainMax: 280, offChart: false }) // ceil(27.5) * 10
+    expect(costSweepView(sweep(400), 'full', 2.5)).toMatchObject({ domainMax: 440, offChart: false })
+    expect(costSweepView(sweep(401), 'full', 2.5)).toMatchObject({ domainMax: 100, offChart: true })
+  })
+
+  it('says why a break-even is null: no trades, or losing before costs', () => {
+    expect(costSweepView(sweep(null), 'full', 0)).toMatchObject({ breakEven: null, nullReason: 'no-trades' })
+    expect(costSweepView(sweep(null), 'full', 3.1)).toMatchObject({ breakEven: null, nullReason: 'losing' })
+    expect(costSweepView(sweep(28), 'full', 0).nullReason).toBeNull()
+  })
+})
+
+describe('calendar grid (§8.2)', () => {
+  const calendar: CalendarReturns = {
+    monthly: [
+      { year: 2020, month: 11, strategy: 0.004, benchmark: 0.1, partial: true },
+      { year: 2020, month: 12, strategy: -0.031, benchmark: 0.03, partial: false },
+      { year: 2021, month: 1, strategy: 0.012, benchmark: -0.01, partial: false },
+      { year: 2021, month: 2, strategy: 0.001, benchmark: 0.02, partial: true },
+    ],
+    annual: [
+      { year: 2020, strategy: -0.027, benchmark: 0.133, partial: true },
+      { year: 2021, strategy: 0.013, benchmark: 0.01, partial: true },
+    ],
+  }
+
+  it('places each month in its year’s row and leaves the rest empty', () => {
+    const { years } = calendarGrid(calendar)
+    expect(years.map((y) => y.year)).toEqual([2020, 2021])
+    expect(years[0].months).toHaveLength(12)
+    expect(years[0].months.slice(0, 10).every((c) => c === null)).toBe(true)
+    expect(years[0].months[10]).toEqual({ value: 0.004, partial: true })
+    expect(years[0].months[11]).toEqual({ value: -0.031, partial: false })
+    expect(years[1].months.slice(0, 2)).toEqual([
+      { value: 0.012, partial: false },
+      { value: 0.001, partial: true },
+    ])
+    expect(years[1].months.slice(2).every((c) => c === null)).toBe(true)
+    expect(years[0]).toMatchObject({ strategy: -0.027, benchmark: 0.133, partial: true })
+  })
+
+  it('scales colours to the largest |monthly return| of the strategy, at least 2%', () => {
+    expect(calendarGrid(calendar).bound).toBe(0.031) // the benchmark's 10% month doesn't count
+    const calm = { ...calendar, monthly: calendar.monthly.map((m) => ({ ...m, strategy: m.strategy / 10 })) }
+    expect(calendarGrid(calm).bound).toBe(0.02)
+  })
+
+  it('rejects a month whose year has no annual row', () => {
+    expect(() => calendarGrid({ ...calendar, annual: calendar.annual.slice(1) })).toThrow(/2020-11/)
   })
 })

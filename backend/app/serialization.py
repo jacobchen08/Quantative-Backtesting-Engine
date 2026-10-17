@@ -70,6 +70,8 @@ def backtest_payload(
         **{name: s[name] for name in ("position", "gross_exposure", "score")},
         **{name: s[name] if name in s else None for name in ("beta", "beta_used", "vol_forecast")},
         "is_oos": s["is_oos"],
+        "rolling_sharpe": s["rolling_sharpe"],
+        "rolling_beta": s["rolling_beta"],
     }
     diagnostics = None
     if d is not None:
@@ -93,6 +95,23 @@ def backtest_payload(
             "metrics": report.metrics,
             "benchmark_metrics": report.benchmark_metrics,
             "diagnostics": diagnostics,
+            "cost_sensitivity": report.cost_sensitivity,
+            "calendar": {
+                "monthly": [
+                    {
+                        "year": r.year,
+                        "month": r.month,
+                        "strategy": r.strategy,
+                        "benchmark": r.benchmark,
+                        "partial": r.partial,
+                    }
+                    for r in report.calendar_monthly
+                ],
+                "annual": [
+                    {"year": r.year, "strategy": r.strategy, "benchmark": r.benchmark, "partial": r.partial}
+                    for r in report.calendar_annual
+                ],
+            },
             "ruined": report.ruined,
             "ruin_date": report.ruin_date,
             "warnings": [*data_warnings, *report.warnings],
@@ -111,6 +130,7 @@ def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
             "n_configs_tested": result.n_configs_tested,
             "window": {"start": result.window_start, "end": result.window_end},
             "selected": selected,
+            "deflated": result.deflated,
         }
     )
 

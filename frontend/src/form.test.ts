@@ -30,6 +30,7 @@ describe('defaults', () => {
     expect([f.pairY, f.pairX]).toEqual(['KO', 'PEP'])
     expect(f.L).toBe('60')
     expect([f.zEntry, f.zExit, f.costBps, f.lag]).toEqual(['2.0', '0.5', '10', '1'])
+    expect([f.borrowBps, f.longOnly]).toEqual(['0', false])
     expect(f.volOn).toBe(false)
     expect(f.mcSeed).toBe('')
   })
@@ -54,7 +55,7 @@ describe('only the controls that apply are sent (§13)', () => {
   it('pairs: z thresholds and hedge mode, no signal frequency', () => {
     const { backtest } = built(form())
     expect(keys(backtest)).toEqual(
-      ['L', 'cost_bps', 'end', 'execution_lag', 'hedge_mode', 'risk_free', 'start', 'strategy', 'tickers', 'z_entry', 'z_exit'].sort(),
+      ['L', 'borrow_bps', 'cost_bps', 'end', 'execution_lag', 'hedge_mode', 'risk_free', 'start', 'strategy', 'tickers', 'z_entry', 'z_exit'].sort(),
     )
     expect(backtest).toEqual({
       strategy: 'pairs',
@@ -66,6 +67,7 @@ describe('only the controls that apply are sent (§13)', () => {
       z_exit: 0.5,
       hedge_mode: 'fixed_at_entry',
       cost_bps: 10,
+      borrow_bps: 0,
       execution_lag: 1,
       risk_free: 'tbill',
     })
@@ -77,6 +79,7 @@ describe('only the controls that apply are sent (§13)', () => {
     expect(backtest.z_entry).toBe(2)
     expect(backtest).not.toHaveProperty('hedge_mode')
     expect(backtest).not.toHaveProperty('signal_frequency')
+    expect(backtest.allow_short).toBe(true)
   })
 
   it('trend: signal frequency, no z thresholds or hedge mode', () => {
@@ -85,6 +88,20 @@ describe('only the controls that apply are sent (§13)', () => {
     expect(backtest.L).toBe(252)
     expect(backtest.signal_frequency).toBe('daily')
     for (const hidden of ['z_entry', 'z_exit', 'hedge_mode']) expect(backtest).not.toHaveProperty(hidden)
+    expect(backtest.allow_short).toBe(true)
+  })
+
+  it('the long-only switch is sent for mean reversion and trend, never for pairs (§5.9)', () => {
+    const longOnly = form({ longOnly: true })
+    expect(built(longOnly).backtest).not.toHaveProperty('allow_short') // pairs always holds a short leg
+    expect(built(withStrategy(longOnly, 'mean_reversion')).backtest.allow_short).toBe(false)
+    expect(built(withStrategy(longOnly, 'trend')).backtest.allow_short).toBe(false)
+  })
+
+  it('the borrow fee is sent for every strategy, in bps a year', () => {
+    for (const strategy of ['pairs', 'mean_reversion', 'trend'] as const) {
+      expect(built(withStrategy(form({ borrowBps: '150' }), strategy)).backtest.borrow_bps).toBe(150)
+    }
   })
 
   it('does not validate hidden controls either', () => {
@@ -127,6 +144,7 @@ describe('malformed input is caught before it can become null', () => {
   it('reports a blank number by its label', () => {
     expect(errorOf(form({ L: '' }))).toBe('Lookback L is required.')
     expect(errorOf(form({ costBps: '  ' }))).toBe('Cost is required.')
+    expect(errorOf(form({ borrowBps: '' }))).toBe('Borrow fee is required.')
     expect(errorOf(form({ mcPaths: '' }))).toBe('Paths is required.')
   })
 

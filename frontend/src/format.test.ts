@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   DASH,
+  fmtBps,
   fmtCI,
   fmtDays,
   fmtInt,
@@ -127,5 +128,15 @@ describe('other formatters', () => {
 
   it('shortens dates to months for axis ticks', () => {
     expect(fmtMonth('2016-01-04')).toBe('2016-01')
+  })
+})
+
+describe('fmtBps', () => {
+  it('formats basis points with one decimal and dashes non-numbers', () => {
+    expect(fmtBps(12.345)).toBe('12.3 bps')
+    expect(fmtBps(10)).toBe('10.0 bps')
+    expect(fmtBps(7.5, 2)).toBe('7.50 bps')
+    expect(fmtBps(null)).toBe('—')
+    expect(fmtBps(Number.NaN)).toBe('—')
   })
 })

@@ -2,7 +2,9 @@
 // backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel.
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, postBacktest, postMonteCarlo, postSensitivity } from './api'
-import { EquityPanel, SignalPanel } from './components/BacktestCharts'
+import { EquityPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
+import { CalendarPanel } from './components/CalendarPanel'
+import { CostSweepPanel } from './components/CostSweepPanel'
 import { KpiGrid } from './components/KpiGrid'
 import { MonteCarloPanel } from './components/MonteCarloPanel'
 import { SensitivityHeatmap } from './components/SensitivityHeatmap'
@@ -12,7 +14,13 @@ import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
 import { buildRequests, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
 import type { Async } from './state'
 import { assumptionLines, benchmarkName, firstOosIndex, seriesRows } from './transform'
-import type { BacktestResponse, MonteCarloResponse, ResolvedBacktestRun, SensitivityResponse } from './types'
+import type {
+  BacktestResponse,
+  MonteCarloResponse,
+  ResolvedBacktestRun,
+  SegmentKey,
+  SensitivityResponse,
+} from './types'
 
 function failure(error: unknown): { status: 'error'; detail: string; httpStatus: number } {
   if (error instanceof ApiError) return { status: 'error', detail: error.message, httpStatus: error.status }
@@ -85,6 +93,7 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState<Async<SensitivityResponse>>({ status: 'idle' })
   const [monteCarlo, setMonteCarlo] = useState<Async<MonteCarloResponse>>({ status: 'idle' })
   const [showBenchmark, setShowBenchmark] = useState(true) // kept across runs
+  const [segment, setSegment] = useState<SegmentKey>('full') // the KPI toggle; the cost sweep follows it
   const inFlight = useRef<AbortController | null>(null)
 
   async function run() {
@@ -171,7 +180,17 @@ export default function App() {
       <>
         <RunHeader bt={bt} />
         <Warnings warnings={bt.warnings} />
-        {guard('Performance', <KpiGrid backtest={bt} monteCarlo={monteCarlo} showBenchmark={showBenchmark} onShowBenchmark={setShowBenchmark} />)}
+        {guard(
+          'Performance',
+          <KpiGrid
+            backtest={bt}
+            monteCarlo={monteCarlo}
+            showBenchmark={showBenchmark}
+            onShowBenchmark={setShowBenchmark}
+            segment={segment}
+            onSegment={setSegment}
+          />,
+        )}
         {guard('Equity', <EquityPanel
             rows={view.rows}
             firstOos={view.firstOos}
@@ -179,11 +198,17 @@ export default function App() {
             showBenchmark={showBenchmark}
             onShowBenchmark={setShowBenchmark}
           />)}
+        {guard('Rolling statistics', <RollingPanel rows={view.rows} firstOos={view.firstOos} />)}
+        {guard(
+          'Calendar returns',
+          <CalendarPanel calendar={bt.calendar} benchmark={view.benchmark} showBenchmark={showBenchmark} />,
+        )}
         {guard(
           'Signal',
           <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />,
         )}
         {guard('Trades', <TradesTable trades={bt.trades} pairs={bt.resolved.strategy === 'pairs'} />)}
+        {guard('Cost sweep', <CostSweepPanel backtest={bt} segment={segment} />)}
         {guard('Sensitivity', <SensitivityHeatmap state={sensitivity} />)}
         {guard('Monte Carlo', <MonteCarloPanel state={monteCarlo} onUseSeed={onUseSeed} />)}
         <AssumptionsFooter resolved={bt.resolved} />

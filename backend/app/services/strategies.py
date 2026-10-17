@@ -194,6 +194,15 @@ def trend_signal(m: pd.Series, signal_frequency: Literal["monthly", "daily"]) ->
     return m.rename("m"), signal.rename("signal")
 
 
+def long_only(signal: pd.Series) -> pd.Series:
+    """The long-only switch (§5.9): clip the raw signal at 0, at the end of step 3 of §5.0.
+
+    The §5.1 hysteresis legs are computed before the clip. They are never on together, so for
+    strategies A and C the clipped signal is exactly the long leg: shorts become flat.
+    """
+    return signal.clip(lower=0.0).rename("signal")
+
+
 def single_unit_weights(signal: pd.Series, ticker: str) -> pd.DataFrame:
     """Unit weight for strategies A and C: one leg, gross exposure 1, equal to the signal."""
     return signal.to_frame(ticker)

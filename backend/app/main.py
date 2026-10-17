@@ -107,7 +107,7 @@ def backtest(request: BacktestRequest, session: SessionDep) -> dict[str, Any]:
     """Run one backtest and store it in backtest_runs."""
     market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
     run = pipeline.run_strategy(market.prices, market.rf, request.to_params())
-    report = pipeline.build_report(run, pairs_diagnostics=diagnostics_cache.get)
+    report = pipeline.build_report(run, pairs_diagnostics=diagnostics_cache.get, end=request.end)
     payload = backtest_payload(
         report, {**request.resolved(), "rf_source": request.rf_source()}, market.warnings
     )

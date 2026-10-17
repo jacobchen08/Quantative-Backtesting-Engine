@@ -1,9 +1,9 @@
-// In-sample Sharpe over the parameter grid, as a CSS grid (§9, §13).
+// In-sample Sharpe over the parameter grid, as a CSS grid, and its deflated Sharpe ratios (§9, §9.1, §13).
 import { memo } from 'react'
 import { DASH, fmtInt, fmtNum } from '../format'
 import type { Async } from '../state'
-import { divergingColor, heatmapBound, heatmapLayout } from '../transform'
-import type { SensitivityResponse } from '../types'
+import { divergingColor, heatmapBound, heatmapLayout, zEntryLabel } from '../transform'
+import type { Deflated, SensitivityResponse } from '../types'
 import { AsyncNotice, Panel } from './ui'
 
 function Legend(props: { bound: number }) {
@@ -57,6 +57,51 @@ function Heatmap(props: { data: SensitivityResponse }) {
         ])}
       </div>
       <Legend bound={bound} />
+      <DeflatedSummary deflated={props.data.deflated} />
+    </div>
+  )
+}
+
+function Stat(props: { label: string; value: string; sub: string; title?: string }) {
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2" title={props.title}>
+      <p className="text-[11px] text-neutral-500">{props.label}</p>
+      <p className="text-lg leading-tight text-neutral-100 tabular-nums">{props.value}</p>
+      <p className="text-[11px] text-neutral-500 tabular-nums">{props.sub}</p>
+    </div>
+  )
+}
+
+/** §9.1: how likely each Sharpe is to beat the best that this many skill-less trials would show. */
+function DeflatedSummary(props: { deflated: Deflated }) {
+  const d = props.deflated
+  const best = d.best
+  const cell = best === null ? '' : `L ${best.L}${best.z_entry === null ? '' : `, ${zEntryLabel(best.z_entry)}`}`
+  const dsrTitle = 'Probability that the true Sharpe ratio exceeds SR₀*, the best a grid of skill-less trials would show by luck'
+  return (
+    <div className="space-y-2 border-t border-neutral-800 pt-3">
+      <p className="text-[11px] tracking-widest text-neutral-500 uppercase">Deflated Sharpe ratio</p>
+      <div className="grid grid-cols-4 gap-2">
+        <Stat label="Trials" value={fmtInt(d.n_trials)} sub="cells with a defined Sharpe" />
+        <Stat
+          label="SR₀*: expected best if no skill"
+          value={fmtNum(d.sr0_star)}
+          sub="annualized"
+          title="The Sharpe ratio the best of N skill-less trials is expected to show, from the spread of the grid's Sharpe ratios"
+        />
+        <Stat label="DSR of this run’s cell" value={fmtNum(d.selected_dsr)} sub="P(true Sharpe > SR₀*)" title={dsrTitle} />
+        <Stat
+          label="DSR of the best cell"
+          value={fmtNum(best?.dsr)}
+          sub={best === null ? 'no cell has a Sharpe' : `${cell} · Sharpe ${fmtNum(best.sharpe)}`}
+          title={dsrTitle}
+        />
+      </div>
+      <p className="text-[11px] leading-snug text-neutral-500">
+        Bailey &amp; López de Prado (2014). It counts only this grid’s trials: settings tried before, by hand or in
+        earlier runs, are hidden trials it can’t see. It also treats neighbouring cells as independent, although they
+        are strongly correlated.
+      </p>
     </div>
   )
 }

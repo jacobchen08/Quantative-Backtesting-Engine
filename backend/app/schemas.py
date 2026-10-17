@@ -88,6 +88,8 @@ class BacktestRequest(BaseModel):
     cost_bps: float = Field(10.0, ge=0, le=100, description="One-way cost per leg, basis points")
     execution_lag: int = Field(1, ge=0, le=5)
     hedge_mode: Literal["fixed_at_entry", "rolling"] = "fixed_at_entry"
+    borrow_bps: float = Field(0.0, ge=0, le=2000, description="Annual fee on short notional, basis points")
+    allow_short: bool = Field(True, description="false clips the signal at 0 (long or flat); not for pairs")
     vol_target: float | None = Field(
         None, ge=0.01, le=0.5, description="Annualized; null turns the overlay off"
     )
@@ -138,6 +140,8 @@ class BacktestRequest(BaseModel):
             raise ValueError(f"L must be between {lo} and {hi} for {self.strategy}, got {self.L}")
         if self.strategy != "trend" and not self.z_exit < self.z_entry:
             raise ValueError(f"z_exit ({self.z_exit}) must be less than z_entry ({self.z_entry})")
+        if self.strategy == "pairs" and not self.allow_short:
+            raise ValueError("pairs needs a short leg, so allow_short=false is not available")
 
     def resolved(self) -> dict[str, Any]:
         """The request with every default filled in, end clamped and non-applicable fields null."""
@@ -162,6 +166,8 @@ class BacktestRequest(BaseModel):
             hedge_mode=self.hedge_mode,
             cost_bps=self.cost_bps,
             execution_lag=self.execution_lag,
+            borrow_bps=self.borrow_bps,
+            allow_short=self.allow_short,
             vol_target=self.vol_target,
             vol_halflife=self.vol_halflife,
             vol_refresh=self.vol_refresh,
@@ -282,6 +288,7 @@ class MetricsOut(BaseModel):
     avg_holding_days: float | None
     ann_turnover: float | None
     ann_cost_drag: float | None
+    ann_borrow_drag: float | None
     avg_gross_exposure: float  # 1 for benchmarks
 
 
@@ -320,6 +327,8 @@ class SeriesOut(BaseModel):
     beta_used: list[float | None] | None  # pairs only
     vol_forecast: list[float | None] | None  # null when the overlay is off
     is_oos: list[bool]
+    rolling_sharpe: list[float | None]  # trailing 252 evaluated days (§8.2)
+    rolling_beta: list[float | None]
 
 
 class SizingOut(BaseModel):
@@ -348,6 +357,8 @@ class ResolvedBacktestRequest(BaseModel):
     cost_bps: float
     execution_lag: int
     hedge_mode: Literal["fixed_at_entry", "rolling"] | None
+    borrow_bps: float
+    allow_short: bool
     vol_target: float | None
     vol_halflife: int | None
     vol_refresh: Literal["daily", "weekly", "monthly"] | None
@@ -363,6 +374,46 @@ class ResolvedBacktestRun(ResolvedBacktestRequest):
     rf_source: str
 
 
+class SegmentSharpeListOut(BaseModel):
+    is_: list[float | None] = Field(alias="is")
+    oos: list[float | None] | None
+    full: list[float | None]
+
+
+class SegmentValueOut(BaseModel):
+    is_: float | None = Field(alias="is")
+    oos: float | None
+    full: float | None
+
+
+class CostSensitivityOut(BaseModel):
+    """§8.1: Sharpe against one-way cost from one run with positions held fixed."""
+
+    cost_bps: list[float]
+    sharpe: SegmentSharpeListOut  # one value per cost_bps entry
+    break_even_bps: SegmentValueOut  # null: no turnover, or losing before costs
+
+
+class MonthlyReturnOut(BaseModel):
+    year: int
+    month: int
+    strategy: float
+    benchmark: float
+    partial: bool
+
+
+class AnnualReturnOut(BaseModel):
+    year: int
+    strategy: float
+    benchmark: float
+    partial: bool
+
+
+class CalendarOut(BaseModel):
+    monthly: list[MonthlyReturnOut]
+    annual: list[AnnualReturnOut]
+
+
 class BacktestResponse(BaseModel):
     run_id: int
     engine_version: str
@@ -373,6 +424,8 @@ class BacktestResponse(BaseModel):
     metrics: SegmentMetricsOut
     benchmark_metrics: SegmentMetricsOut
     diagnostics: DiagnosticsOut | None  # pairs only
+    cost_sensitivity: CostSensitivityOut | None  # null if ruined
+    calendar: CalendarOut
     ruined: bool
     ruin_date: str | None
     warnings: list[str]
@@ -388,6 +441,22 @@ class SelectedCellOut(BaseModel):
     z_entry: float | None
 
 
+class BestCellOut(BaseModel):
+    L: int
+    z_entry: float | None
+    sharpe: float
+    dsr: float | None
+
+
+class DeflatedOut(BaseModel):
+    """§9.1 deflated Sharpe ratios on the common window."""
+
+    n_trials: int
+    sr0_star: float | None  # annualized for display
+    selected_dsr: float | None
+    best: BestCellOut | None
+
+
 class SensitivityResponse(BaseModel):
     L_values: list[int]
     z_entry_values: list[float] | None  # null for trend
@@ -395,6 +464,7 @@ class SensitivityResponse(BaseModel):
     n_configs_tested: int
     window: WindowOut
     selected: SelectedCellOut | None
+    deflated: DeflatedOut
 
 
 class BandsOut(BaseModel):

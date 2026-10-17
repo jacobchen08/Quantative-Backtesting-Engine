@@ -97,10 +97,17 @@ def test_health() -> None:
     [
         {"strategy": "mean_reversion", "tickers": ["Y"]},
         {"strategy": "pairs", "tickers": ["Y", "X"]},  # never mentions SPY; risk_free defaults to "tbill"
-        {"strategy": "pairs", "tickers": ["y", "x"], "hedge_mode": "rolling", "risk_free": 0.03},
+        {
+            "strategy": "pairs",
+            "tickers": ["y", "x"],
+            "hedge_mode": "rolling",
+            "risk_free": 0.03,
+            "borrow_bps": 150.0,
+        },
         {"strategy": "trend", "tickers": ["SPY"], "vol_target": 0.10, "vol_refresh": "daily"},
+        {"strategy": "mean_reversion", "tickers": ["Y"], "allow_short": False, "borrow_bps": 300.0},
     ],
-    ids=["mean-reversion", "pairs-tbill", "pairs-constant-rf", "trend-overlay"],
+    ids=["mean-reversion", "pairs-tbill", "pairs-constant-rf-borrow", "trend-overlay", "long-only-borrow"],
 )
 def test_backtest(client: TestClient, request_fields: dict) -> None:
     out = post(client, "/api/backtest", {**request_fields, "start": START, "end": END})
@@ -119,6 +126,24 @@ def test_backtest(client: TestClient, request_fields: dict) -> None:
     assert (out["sizing"] is not None) == ("vol_target" in request_fields)
     assert set(out["metrics"]) == set(out["benchmark_metrics"]) == {"is", "oos", "full"}
     assert out["trades"] and all(t["segment"] in ("is", "oos") for t in out["trades"])
+    # Phase 5: the borrow fee and long-only switch, the cost sweep, calendar and rolling statistics.
+    borrow, allow_short = request_fields.get("borrow_bps", 0.0), request_fields.get("allow_short", True)
+    assert (resolved["borrow_bps"], resolved["allow_short"]) == (borrow, allow_short)
+    assert (out["metrics"]["full"]["ann_borrow_drag"] > 0) == (borrow > 0 and allow_short)
+    assert out["benchmark_metrics"]["full"]["ann_borrow_drag"] is None
+    if not allow_short:
+        assert all(t["side"] == "long" for t in out["trades"]) and min(series["position"]) == 0
+    sweep = out["cost_sensitivity"]
+    assert sweep["cost_bps"] == sorted(sweep["cost_bps"]) and resolved["cost_bps"] in sweep["cost_bps"]
+    assert all(len(sweep["sharpe"][seg]) == len(sweep["cost_bps"]) for seg in ("is", "oos", "full"))
+    own = sweep["cost_bps"].index(resolved["cost_bps"])
+    assert sweep["sharpe"]["full"][own] == out["metrics"]["full"]["sharpe"]
+    months, years = out["calendar"]["monthly"], out["calendar"]["annual"]
+    assert [m["year"] * 12 + m["month"] for m in months] == sorted(
+        {m["year"] * 12 + m["month"] for m in months}
+    )
+    assert [y["year"] for y in years] == sorted({m["year"] for m in months})
+    assert any(v is not None for v in series["rolling_sharpe"])  # lengths are checked above
 
 
 def test_sensitivity(client: TestClient) -> None:
@@ -129,6 +154,14 @@ def test_sensitivity(client: TestClient) -> None:
     assert out["L_values"] == [20, 40, 60, 90, 120] and out["z_entry_values"] == [1.5, 2.0, 2.5, 3.0]
     assert out["n_configs_tested"] == 20 and out["selected"] == {"L": 60, "z_entry": 2.0}
     assert out["window"]["start"] < out["window"]["end"]
+    deflated = out["deflated"]
+    assert 2 <= deflated["n_trials"] <= 20 and deflated["sr0_star"] > 0
+    assert 0 <= deflated["selected_dsr"] <= 1 and 0 <= deflated["best"]["dsr"] <= 1
+    best = deflated["best"]
+    row, col = out["L_values"].index(best["L"]), out["z_entry_values"].index(best["z_entry"])
+    assert (
+        out["sharpe"][row][col] == best["sharpe"] == max(v for r in out["sharpe"] for v in r if v is not None)
+    )
 
 
 @pytest.mark.parametrize(
@@ -189,6 +222,13 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         ("/api/monte-carlo", {"source": "ticker", "ticker": "SPY", "seed": 2**53}, "seed"),
         ("/api/monte-carlo", {"source": "strategy"}, "backtest is required"),
         ("/api/monte-carlo", {"source": "ticker", "ticker": "SPY", "start": "2021-01-04"}, "at least 252"),
+        (
+            "/api/backtest",
+            {"strategy": "pairs", "tickers": ["Y", "X"], "allow_short": False},
+            "pairs needs a short leg, so allow_short=false is not available",
+        ),
+        ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": 2001}, "borrow_bps"),
+        ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": -1}, "borrow_bps"),
     ],
     ids=[
         "z_exit>=z_entry",
@@ -202,6 +242,9 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         "seed-2^53",
         "missing-backtest",
         "short-history",
+        "pairs-long-only",
+        "borrow-over-2000",
+        "borrow-negative",
     ],
 )
 def test_invalid_requests_are_422_with_a_readable_detail(
@@ -392,3 +435,16 @@ def test_a_one_day_oos_segment_after_ruin_still_validates(
         assert oos[field] is None, field
     assert out["series"]["dates"][-1] == split and out["series"]["equity"][-1] == 0.0
     assert any(w.startswith("Ruin on") for w in out["warnings"])
+    assert out["cost_sensitivity"] is None  # clipping makes excess non-linear in the cost (§8.1)
+    assert out["calendar"]["monthly"][-1]["partial"] and out["calendar"]["annual"][-1]["partial"]
+
+
+# ---------------------------------------------------------------- Phase 5: a zero borrow fee is the default
+
+
+def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
+    request = {"strategy": "mean_reversion", "tickers": ["Y"], "start": START, "end": END}
+    implicit = post(client, "/api/backtest", request)
+    explicit = post(client, "/api/backtest", {**request, "borrow_bps": 0, "allow_short": True})
+    assert implicit["resolved"]["borrow_bps"] == 0.0 and implicit["resolved"]["allow_short"] is True
+    assert {**implicit, "run_id": None} == {**explicit, "run_id": None}

@@ -22,6 +22,8 @@ export type BacktestRequest = {
   cost_bps?: number
   execution_lag?: number
   hedge_mode?: HedgeMode
+  borrow_bps?: number
+  allow_short?: boolean
   vol_target?: number | null
   vol_halflife?: number
   vol_refresh?: VolRefresh
@@ -64,6 +66,8 @@ export type ResolvedBacktestRequest = {
   cost_bps: number
   execution_lag: number
   hedge_mode: HedgeMode | null
+  borrow_bps: number
+  allow_short: boolean
   vol_target: number | null
   vol_halflife: number | null
   vol_refresh: VolRefresh | null
@@ -96,6 +100,7 @@ export type Metrics = {
   pct_days_in_market: number; n_closed_trades: number | null; n_open_trades: number | null;
   win_rate: number | null; avg_holding_days: number | null;
   ann_turnover: number | null; ann_cost_drag: number | null;   // trade/cost fields are null for benchmarks
+  ann_borrow_drag: number | null;                               // Phase 5; null for benchmarks
   avg_gross_exposure: number;                                   // 1 for benchmarks
 };
 export type Trade = {
@@ -103,6 +108,7 @@ export type Trade = {
   signal_date: string; entry_date: string; exit_signal_date: string | null; exit_date: string | null;
   holding_days: number; pnl: number; beta_at_entry: number | null;
 };
+type BySegment<T> = { is: T; oos: T | null; full: T };          // oos is null only if ruin happened in IS
 export type BacktestResponse = {
   run_id: number; engine_version: string;
   resolved: ResolvedBacktestRequest & { split_date: string; first_evaluated_date: string; rf_source: string };
@@ -117,6 +123,7 @@ export type BacktestResponse = {
     beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only
     vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off
     is_oos: boolean[];
+    rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // Phase 5, §8.2
   };
   sizing: { vol_target: number; max_leverage: number;
             pct_days_at_cap: number | null } | null;   // whole object null when the overlay is off; pct null if never invested
@@ -125,6 +132,11 @@ export type BacktestResponse = {
   benchmark_metrics: { is: Metrics; oos: Metrics | null; full: Metrics };  // same window as the strategy
   diagnostics: { coint_p_is: number | null; coint_p_oos: number | null; half_life_is: number | null;
                  static_beta_is: number | null; static_alpha_is: number | null } | null;    // pairs only (null for mean_reversion and trend)
+  cost_sensitivity: { cost_bps: number[];                       // Phase 5, §8.1; null if ruined
+                      sharpe: BySegment<(number | null)[]>;     // one value per cost_bps entry
+                      break_even_bps: BySegment<number | null> } | null;
+  calendar: { monthly: { year: number; month: number; strategy: number; benchmark: number; partial: boolean }[];
+              annual: { year: number; strategy: number; benchmark: number; partial: boolean }[] };   // Phase 5, §8.2
   ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 export type SensitivityResponse = {
@@ -132,6 +144,9 @@ export type SensitivityResponse = {
   sharpe: (number | null)[][];                                  // rows = L; one column for trend
   n_configs_tested: number; window: { start: string; end: string };
   selected: { L: number; z_entry: number | null } | null;       // the request's own cell, if it is in the grid
+  deflated: { n_trials: number; sr0_star: number | null;        // Phase 5, §9.1; sr0_star annualized for display
+              selected_dsr: number | null;
+              best: { L: number; z_entry: number | null; sharpe: number; dsr: number | null } | null };
 };
 export type ModelResult = {
   bands: { p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] };   // length T+1
@@ -153,3 +168,6 @@ export type Series = BacktestResponse['series']
 export type SegmentMetrics = BacktestResponse['metrics']
 export type SegmentKey = keyof SegmentMetrics
 export type ResolvedBacktestRun = BacktestResponse['resolved']
+export type CostSensitivity = NonNullable<BacktestResponse['cost_sensitivity']>
+export type CalendarReturns = BacktestResponse['calendar']
+export type Deflated = SensitivityResponse['deflated']

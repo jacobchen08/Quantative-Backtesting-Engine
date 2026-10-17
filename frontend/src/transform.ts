@@ -1,6 +1,8 @@
 // Pure transforms from API responses to chart rows, table orderings and labels.
 import { fmtLag, fmtMultiple, fmtRate } from './format'
 import type {
+  CalendarReturns,
+  CostSensitivity,
   ModelResult,
   ResolvedBacktestRun,
   SegmentKey,
@@ -22,6 +24,8 @@ export type SeriesRow = {
   betaUsed: number | null
   exposure: number
   volForecast: number | null
+  rollingSharpe: number | null // trailing 252 evaluated days (§8.2)
+  rollingBeta: number | null
   oos: boolean
   // Trade markers at signal dates, placed on the score (§13); null on every other day.
   entryLong: number | null
@@ -50,6 +54,8 @@ export function seriesRows(series: Series, trades: readonly Trade[]): SeriesRows
     series.gross_exposure,
     series.score,
     series.is_oos,
+    series.rolling_sharpe,
+    series.rolling_beta,
     ...[series.beta, series.beta_used, series.vol_forecast].filter((a) => a !== null),
   ]
   if (arrays.some((a) => a.length !== n)) throw new Error('The series arrays have different lengths.')
@@ -64,6 +70,8 @@ export function seriesRows(series: Series, trades: readonly Trade[]): SeriesRows
     betaUsed: series.beta_used?.[i] ?? null,
     exposure: series.gross_exposure[i],
     volForecast: series.vol_forecast?.[i] ?? null,
+    rollingSharpe: series.rolling_sharpe[i],
+    rollingBeta: series.rolling_beta[i],
     oos: series.is_oos[i],
     entryLong: null,
     entryShort: null,
@@ -116,6 +124,14 @@ export function segmentRange(
 export function assumptionLines(r: ResolvedBacktestRun): string[] {
   return [
     `Costs: ${r.cost_bps} bps one-way, per leg, on traded notional`,
+    r.borrow_bps > 0
+      ? `Borrow fee: ${r.borrow_bps} bps a year on short notional, charged daily`
+      : 'Borrow fee: none; short-sale proceeds earn the risk-free rate',
+    r.strategy === 'pairs'
+      ? 'Shorting: required (a pair always holds a short leg)'
+      : r.allow_short
+        ? 'Shorting: allowed'
+        : 'Long only: short signals are held flat',
     `Execution lag: ${fmtLag(r.execution_lag)}`,
     `Risk-free rate: ${r.rf_source}; idle cash and short-sale proceeds earn it`,
     'Rebalancing: daily, to target weights; turnover from price drift is ignored',
@@ -157,6 +173,11 @@ export type HeatLayout = {
   colAxis: string
 }
 
+/** "z 2.0" for a whole number, else "z 2.25": the heatmap's column labels, also used by the DSR summary. */
+export function zEntryLabel(z: number): string {
+  return `z ${Number.isInteger(z) ? z.toFixed(1) : z}`
+}
+
 /** "252 (12m)" when L is a whole number of 21-day months, else "250". */
 export function lookbackLabel(L: number): string {
   return L % 21 === 0 ? `${L} (${L / 21}m)` : String(L)
@@ -181,7 +202,7 @@ export function heatmapLayout(resp: SensitivityResponse): HeatLayout {
   }
   return {
     rowLabels: resp.L_values.map((L) => `L ${L}`),
-    colLabels: zs.map((z) => `z ${Number.isInteger(z) ? z.toFixed(1) : z}`), // 2 -> "z 2.0", 2.25 -> "z 2.25"
+    colLabels: zs.map(zEntryLabel), // 2 -> "z 2.0", 2.25 -> "z 2.25"
     cells: resp.L_values.map((L, i) =>
       zs.map((z, j) => ({ sharpe: resp.sharpe[i][j], L, zEntry: z, selected: isSelected(L, z) })),
     ),
@@ -269,4 +290,70 @@ export function histogramRows(counts: readonly number[], edges: readonly number[
     share: total > 0 ? count / total : 0,
     tail: i === 0 ? 'low' : i === counts.length - 1 ? 'high' : null,
   }))
+}
+
+// ---------------------------------------------------------------- cost sweep (§8.1)
+
+export type CostSweepRow = { bps: number; sharpe: number | null }
+
+export type CostSweepView = {
+  rows: CostSweepRow[]
+  breakEven: number | null
+  /** Why the break-even is null: the segment has no turnover, or it loses money before costs. */
+  nullReason: 'no-trades' | 'losing' | null
+  /** The x-axis runs from 0 to this: the grid's top cost, stretched to show a break-even up to 4× beyond it. */
+  domainMax: number
+  /** A break-even past 4× the grid's top cost is reported in words instead of drawn. */
+  offChart: boolean
+}
+
+/**
+ * Sharpe against one-way cost for one segment. annTurnover is that segment's ann_turnover, which
+ * tells "no trades" (0) apart from "losing before costs" when the break-even is null.
+ */
+export function costSweepView(cs: CostSensitivity, segment: SegmentKey, annTurnover: number | null): CostSweepView {
+  const sharpe = cs.sharpe[segment]
+  const rows = cs.cost_bps.map((bps, i) => ({ bps, sharpe: sharpe?.[i] ?? null }))
+  const breakEven = cs.break_even_bps[segment] ?? null
+  const top = Math.max(...cs.cost_bps)
+  const stretch = breakEven !== null && breakEven > top && breakEven <= 4 * top
+  return {
+    rows,
+    breakEven,
+    nullReason: breakEven !== null ? null : annTurnover === 0 ? 'no-trades' : 'losing',
+    domainMax: stretch ? Math.ceil((breakEven * 11) / 100) * 10 : top, // 10% headroom, in whole tens
+    offChart: breakEven !== null && breakEven > 4 * top,
+  }
+}
+
+// ---------------------------------------------------------------- calendar returns (§8.2)
+
+export type CalendarCell = { value: number; partial: boolean }
+
+export type CalendarYear = {
+  year: number
+  months: (CalendarCell | null)[] // 12 entries, January first; null outside the evaluation window
+  strategy: number
+  benchmark: number
+  partial: boolean
+}
+
+/**
+ * Years × months of the strategy's monthly returns, oldest year first. The colour scale's
+ * half-width is the largest |monthly return|, but at least 2% (§13).
+ */
+export function calendarGrid(cal: CalendarReturns): { years: CalendarYear[]; bound: number } {
+  const years = new Map<number, CalendarYear>(
+    cal.annual.map((a) => [
+      a.year,
+      { year: a.year, months: Array<CalendarCell | null>(12).fill(null), strategy: a.strategy, benchmark: a.benchmark, partial: a.partial },
+    ]),
+  )
+  for (const m of cal.monthly) {
+    const year = years.get(m.year)
+    if (year === undefined) throw new Error(`The calendar has ${m.year}-${m.month} but no row for ${m.year}.`)
+    year.months[m.month - 1] = { value: m.strategy, partial: m.partial }
+  }
+  const bound = Math.max(0.02, ...cal.monthly.map((m) => Math.abs(m.strategy)))
+  return { years: [...years.values()].sort((a, b) => a.year - b.year), bound }
 }

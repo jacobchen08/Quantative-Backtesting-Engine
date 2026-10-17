@@ -55,6 +55,8 @@ export type FormState = {
   signalFrequency: SignalFrequency
   hedgeMode: HedgeMode
   costBps: string // one-way, per leg
+  borrowBps: string // a year, on short notional
+  longOnly: boolean // mean reversion and trend: clip shorts to flat (§5.9)
   lag: string // trading days
   rfMode: 'tbill' | 'constant'
   rfPct: string // annual %, used when rfMode is 'constant'
@@ -85,6 +87,8 @@ export function defaultForm(today: string): FormState {
     signalFrequency: 'monthly',
     hedgeMode: 'fixed_at_entry',
     costBps: '10',
+    borrowBps: '0',
+    longOnly: false,
     lag: '1',
     rfMode: 'tbill',
     rfPct: '3',
@@ -195,6 +199,8 @@ function buildBacktest(form: FormState): BacktestRequest {
   }
   if (strategy === 'pairs') request.hedge_mode = form.hedgeMode
   request.cost_bps = num('Cost', form.costBps)
+  request.borrow_bps = num('Borrow fee', form.borrowBps)
+  if (strategy !== 'pairs') request.allow_short = !form.longOnly // pairs always holds a short leg
   request.execution_lag = num('Execution lag', form.lag)
   request.risk_free = form.rfMode === 'tbill' ? 'tbill' : pct('Constant risk-free rate', form.rfPct)
   if (form.volOn) {

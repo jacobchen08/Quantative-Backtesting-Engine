@@ -273,6 +273,23 @@ export function Sidebar(props: {
                 ? 'Fills at the next close (conservative).'
                 : `Fills ${form.lag} closes after the signal.`}
           </p>
+          <Field
+            label="Borrow fee (bps a year)"
+            hint={`Charged daily on short notional${strategy === 'pairs' ? '; a pair always holds a short leg' : ''}.`}
+          >
+            <NumberInput value={form.borrowBps} onChange={set('borrowBps')} min={0} max={2000} step={25} />
+          </Field>
+          {strategy !== 'pairs' && (
+            <label className="flex items-center gap-1.5 text-xs text-neutral-400">
+              <input
+                type="checkbox"
+                className="accent-emerald-500"
+                checked={form.longOnly}
+                onChange={(e) => set('longOnly')(e.target.checked)}
+              />
+              Long only: short signals are held flat
+            </label>
+          )}
           <Field label="Risk-free rate">
             <div className="flex items-center gap-2">
               <Segmented

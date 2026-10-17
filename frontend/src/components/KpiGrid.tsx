@@ -1,7 +1,9 @@
 // KPI grid with an IS | OOS | Full toggle (§13). Benchmark figures sit under each strategy figure.
-import { memo, useState, type ReactNode } from 'react'
+// The segment is App's state, because the cost sweep (§8.1) follows the same toggle.
+import { memo, type ReactNode } from 'react'
 import {
   DASH,
+  fmtBps,
   fmtCI,
   fmtDays,
   fmtInt,
@@ -44,10 +46,41 @@ const KPIS: readonly Kpi[] = [
   },
   { label: 'Avg holding', value: (m) => fmtDays(m.avg_holding_days), bench: false, title: 'Closed trades, trading days' },
   { label: 'Days in market', value: (m) => fmtPct(m.pct_days_in_market, 0) },
-  { label: 'Turnover', value: (m) => fmtTurnover(m.ann_turnover), bench: false },
-  { label: 'Cost drag', value: (m) => (isNum(m.ann_cost_drag) ? `${fmtPct(m.ann_cost_drag, 2)}/yr` : DASH), bench: false },
   { label: 'Avg gross exposure', value: (m) => fmtMultiple(m.avg_gross_exposure), title: 'Held into each day; flat days count as 0' },
 ]
+
+const perYear = (x: number | null) => (isNum(x) ? `${fmtPct(x, 2)}/yr` : DASH)
+
+const COST_KPIS: readonly Kpi[] = [
+  { label: 'Turnover', value: (m) => fmtTurnover(m.ann_turnover), bench: false },
+  { label: 'Cost drag', value: (m) => perYear(m.ann_cost_drag), bench: false, title: 'Trading costs: mean daily cost × 252' },
+  {
+    label: 'Borrow drag',
+    value: (m) => perYear(m.ann_borrow_drag),
+    bench: false,
+    title: 'Borrow fees on short notional: mean daily fee × 252',
+  },
+]
+
+/** The break-even tile (§8.1): the one-way cost at which the segment's mean excess return is 0. */
+function BreakEvenTile(props: { backtest: BacktestResponse; segment: SegmentKey; metrics: Metrics }) {
+  const { cost_sensitivity: cs, resolved } = props.backtest
+  const cost = resolved.cost_bps
+  if (cs === null) {
+    return <Tile label="Break-even cost" value={DASH} sub="not computed: the run was ruined" />
+  }
+  const be = cs.break_even_bps[props.segment] ?? null
+  const why = props.metrics.ann_turnover === 0 ? 'no trades in this segment' : 'loses money before costs'
+  return (
+    <Tile
+      label="Break-even cost"
+      value={be === null ? DASH : fmtBps(be)}
+      sub={be === null ? why : `one-way · this run ${fmtBps(cost)}`}
+      title="The one-way cost at which this segment's mean excess return is 0. Amber: below twice this run's cost."
+      tone={be !== null && be < 2 * cost ? 'warn' : undefined}
+    />
+  )
+}
 
 function Tile(props: { label: string; value: string; sub?: string; bench?: string; title?: string; tone?: 'warn' }) {
   return (
@@ -97,9 +130,10 @@ export const KpiGrid = memo(function KpiGrid(props: {
   monteCarlo: Async<MonteCarloResponse>
   showBenchmark: boolean
   onShowBenchmark: (show: boolean) => void
+  segment: SegmentKey
+  onSegment: (segment: SegmentKey) => void
 }) {
-  const { backtest: bt, monteCarlo: mc, showBenchmark } = props
-  const [segment, setSegment] = useState<SegmentKey>('full')
+  const { backtest: bt, monteCarlo: mc, showBenchmark, segment } = props
   const m = bt.metrics[segment]
   const b = bt.benchmark_metrics[segment]
   const bench = benchmarkName(bt.resolved.strategy, bt.resolved.tickers)
@@ -120,7 +154,7 @@ export const KpiGrid = memo(function KpiGrid(props: {
           <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the KPI tiles and the chart">
             Buy &amp; hold {bench}
           </Toggle>
-          <Segmented label="Segment" value={segment} options={SEGMENTS} onChange={setSegment} />
+          <Segmented label="Segment" value={segment} options={SEGMENTS} onChange={props.onSegment} />
         </div>
       }
     >
@@ -130,18 +164,26 @@ export const KpiGrid = memo(function KpiGrid(props: {
             No out-of-sample segment: the run was ruined in-sample on {bt.ruin_date ?? DASH}, before the split.
           </p>
         ) : (
-          <Group title="Strategy" note={showBenchmark && <span className="text-slate-400">grey: buy &amp; hold {bench}</span>}>
-            {KPIS.map((k) => (
-              <Tile
-                key={k.label}
-                label={k.label}
-                value={k.value(m)}
-                sub={k.sub?.(m)}
-                bench={!showBenchmark || k.bench === false ? undefined : `B&H ${k.value(b)}`}
-                title={k.title}
-              />
-            ))}
-          </Group>
+          <>
+            <Group title="Strategy" note={showBenchmark && <span className="text-slate-400">grey: buy &amp; hold {bench}</span>}>
+              {KPIS.map((k) => (
+                <Tile
+                  key={k.label}
+                  label={k.label}
+                  value={k.value(m)}
+                  sub={k.sub?.(m)}
+                  bench={!showBenchmark || k.bench === false ? undefined : `B&H ${k.value(b)}`}
+                  title={k.title}
+                />
+              ))}
+            </Group>
+            <Group title="Costs" note={`${fmtBps(bt.resolved.cost_bps)} one-way · borrow ${fmtBps(bt.resolved.borrow_bps)} a year`}>
+              {COST_KPIS.map((k) => (
+                <Tile key={k.label} label={k.label} value={k.value(m)} title={k.title} />
+              ))}
+              <BreakEvenTile backtest={bt} segment={segment} metrics={m} />
+            </Group>
+          </>
         )}
 
         {sizing && (

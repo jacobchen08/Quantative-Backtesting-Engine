@@ -1,8 +1,8 @@
 # Methodology
 
-Why the engine computes what it computes, what it can't tell you, and every approved departure from the specification, [CLAUDE.md](../CLAUDE.md) (§15). Section signs (§) refer to CLAUDE.md. This covers everything built through Phase 4; Phases 5–9 add their own sections as they land.
+Why the engine computes what it computes, what it can't tell you, and every approved departure from the specification, [CLAUDE.md](../CLAUDE.md) (§15). Section signs (§) refer to CLAUDE.md. This covers everything built through Phase 5; Phases 6–9 add their own sections as they land.
 
-**Measured figures.** A figure marked *(engine)* was measured on 2026-10-16 with this code, through the same loader and pipeline as `/api/backtest`, on Yahoo Finance data cached that day. Each comes with the request that reproduces it; fields not shown are the defaults (10 bps one-way, k = 1, ^IRX). Timings come only from `scripts/bench.py` (see the README).
+**Measured figures.** A figure marked *(engine)* was measured on 2026-10-16 (Phases 0–4) or 2026-10-17 (Phase 5) with this code, through the same loader and pipeline as `/api/backtest`, on Yahoo Finance data cached that day. Each comes with the request that reproduces it; fields not shown are the defaults (10 bps one-way, k = 1, ^IRX). Timings come only from `scripts/bench.py` (see the README).
 
 ## Justifications
 
@@ -199,7 +199,8 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - gross excess = Σ_i w_prev,i (r_i − rf);
   - turnover = Σ_i |w_i − w_prev,i|, counting every leg;
   - cost = c × turnover, charged on the trade day;
-  - excess = gross excess − cost, and total = rf + excess.
+  - borrow = (b / 10,000 / 252) × Σ_i max(−w_prev,i, 0), the borrow fee on the short notional held into the day (§22 below);
+  - excess = gross excess − borrow − cost, and total = rf + excess.
 
   A round trip costs 2c × gross exposure, and a pair pays on both legs.
 - **Two approximations (§6.1):**
@@ -235,7 +236,9 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - exit to flat: b = 0, so the old trade pays all of it;
   - direct flip: every leg's weight changes sign, so turnover = Σ|w − w_prev| = a + b. The split charges c·a to the closing trade and c·b to the opening one;
   - rebalancing inside a trade (`rolling` hedge mode, or vol resizing): both parts land on the same trade.
-- **Reconciliation.** Each day's excess return is split between `held_id` and `trade_id`, and a fully flat day contributes exactly 0. So the trades' P&L, open and closed, sums to the total excess return over the window. The tests require agreement within 1e-9 on 144 random runs, covering both hedge modes, the vol overlay with in-trade resizing, and lags of 0 to 2 (§12).
+
+  The borrow fee is a holding cost, like the day's return, so it goes to `held_id`.
+- **Reconciliation.** Each day's excess return is split between `held_id` and `trade_id`, and a fully flat day contributes exactly 0. So the trades' P&L, open and closed, sums to the total excess return over the window. The tests require agreement within 1e-9 on 144 random runs, covering both hedge modes, the vol overlay with in-trade resizing, lags of 0 to 2, borrow fees up to 2,000 bps and the long-only switch (§12).
 - **Bookkeeping (§7.3).**
   - `exit_date` is the last day the trade is held into: the day its exit order fills. The last day it appears in `trade_id` is the day before.
   - A trade entered on the final day is open, with 0 holding days and a P&L equal to its entry cost.
@@ -252,7 +255,7 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **Exposure statistics.**
   - `pct_days_in_market` counts the days with a position held into them.
   - `avg_gross_exposure` averages Σ|w_prev| over all days, with flat days counting 0, so it shows leverage.
-  - `ann_turnover` and `ann_cost_drag` annualize the daily means.
+  - `ann_turnover`, `ann_cost_drag` and `ann_borrow_drag` annualize the daily means.
 - **Null thresholds.** A Sharpe ratio, Sortino ratio or beta needs n ≥ 2, a denominator above 1e-12, and some exposure.
   - A strategy that never trades has excess exactly 0 and a `null` Sharpe ratio, not 0 and not 7e15.
   - 1e-12 is far below any real daily standard deviation (a volatility of 1% a year is 6e-4 a day) and far above rounding noise (about 1e-17).
@@ -262,7 +265,8 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - a non-positive hedge ratio at entry: the "hedge" adds exposure instead of offsetting it;
   - the data problems of §4.4;
   - ruin;
-  - a leverage cap that binds on more than a quarter of invested days.
+  - a leverage cap that binds on more than a quarter of invested days;
+  - a full-period break-even cost below twice the request's cost (§23 below).
 
 ### 17. Parameter sensitivity (§9)
 - **One split.** The split is resolved once, for the request's own configuration, exactly as `/api/backtest` would. Every configuration then uses that date; otherwise each L would compute its own 70% point.
@@ -270,7 +274,7 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **A common scoring window,** [the latest first-evaluated day, the split). Comparing an L = 20 Sharpe ratio over seven years with an L = 120 one over six would mix the effect of the parameter with the effect of the period.
 - **IS only.** OOS returns exist internally but are never scored or returned, so looking at the grid can't contaminate the OOS segment.
 - **Enough history.** The common window must be at least 252 days. The grid can fail where a single backtest succeeds, so the error names the lookback that is too long.
-- **Multiple testing.** The best of 20 configurations is biased upwards by the selection itself (see Limitations). The heatmap outlines the request's own cell, not the best one.
+- **Multiple testing.** The best of 20 configurations is biased upwards by the selection itself. The heatmap outlines the request's own cell, not the best one, and reports the deflated Sharpe ratio of both (§25 below).
 
 ### 18. Monte Carlo (§10)
 - **Input checks (§10.1):**
@@ -328,7 +332,80 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **Trade markers sit at signal dates,** when the decision was made, not at fill dates, so they line up with the score that triggered them.
 - **The heatmap's colour scale is centred on a Sharpe of 0,** so colour shows the sign. The request's own cell is outlined, not the best one.
 - **The histogram's red line is at −VaR95:** the loss that the worst 5% of outcomes exceed.
-- **An assumptions footer** restates the cost, the lag, the rf source, daily rebalancing and the vol settings beside the results they qualify.
+- **An assumptions footer** restates the cost, the borrow fee, the shorting setting, the lag, the rf source, daily rebalancing and the vol settings beside the results they qualify.
+- **The cost sweep follows the KPI grid's IS / OOS / Full toggle,** so the break-even line and the KPI tile always describe the same days.
+- **The rolling charts share the equity chart's rows and `syncId`,** so hovering a date shows the equity, the drawdown and the trailing-year Sharpe and beta of that day together.
+- **Calendar months use the heatmap's diverging scale,** bounded by the largest |monthly return| but at least 2%, so a quiet strategy's months aren't all saturated. Partial periods are hatched.
+
+### 22. Borrow fee and the long-only switch (§5.9, §6.1)
+- **What a short costs.** Shorting means borrowing the shares, and the lender charges an annual fee on their value. The engine charges b basis points a year on the short notional held into each day: borrow_t = (b / 10,000 / 252) · Σ_i max(−w_i,t−1, 0). It accrues daily on the same 252-day basis as rf. The sale proceeds still earn rf (§4 above), so the fee is the only extra cost.
+  - It covers a single-asset short and the short leg of a pair. A long-only run, and every flat day, pay exactly 0 (tested).
+  - It is a holding cost, so it is attributed to the trade held into the day (§15), and the trades still reconcile with the total excess return.
+  - *(engine)* `{"strategy": "pairs", "tickers": ["KO", "PEP"], "start": "2015-01-02", "end": "2025-12-31", "borrow_bps": 50}`: the pair holds a position on 42.1% of days, about half of it short, so the fee costs 0.11% a year (`ann_borrow_drag` 0.00106) and moves the full-period Sharpe ratio from −0.28 to −0.29.
+- **A zero fee changes nothing.** With b = 0 the term is +0.0, and x − 0.0 = x in floating point, so every output is bit-identical to the earlier phases. This was checked two ways:
+  - a test that excess equals gross excess − cost bit for bit;
+  - a one-off comparison of 11 API responses on real data (6 backtests, 3 grids and 2 Monte Carlo runs), from the Phase 4 code and from this code. With the Phase 5 fields removed, they were identical as JSON text, which also compares the sign of zero.
+- **The long-only switch** (`allow_short=false`) clips the signal at 0 after the entry rule, so a short signal means flat.
+  - The §5.1 rule runs two hysteresis legs, long and short, that are never on together. The clipped signal is therefore exactly the long leg. A long-only run has exactly the long trades of the long/short run: the same dates, and the same P&L to the last bit (tested).
+  - The P&L matches because a direct flip from short to long costs 2c, split c/c between the two trades (§15), and an entry from flat costs c.
+  - Pairs return 422: a pair's hedge is its short leg.
+  - *(engine)* SPY trend, monthly signal, 2006-01-03 to 2025-12-31: long/short has a Sharpe ratio of 0.32, a CAGR of 5.9% and a maximum drawdown of −45.2%; long-only (`allow_short: false`) has 0.57, 9.2% and −33.7%, invested on 80.2% of days. Over these 20 years, shorting SPY when its trend turned negative lost money relative to holding cash.
+
+### 23. Cost sweep and break-even cost (§8.1)
+- **Why one run is enough.** Positions are decided before costs. Signals, weights and turnover don't depend on the cost c, so the daily excess return is exactly linear in it:
+
+  excess_t(c) = gross excess_t − borrow_t − c · turnover_t.
+
+  The whole sweep comes from one run. The test re-runs the backtest at every grid cost and matches the sweep within 1e-12, and the sweep at the request's own cost equals the run's Sharpe exactly (the same expression on the same numbers).
+- **The break-even cost.** A Sharpe ratio is 0 exactly when the mean excess return is 0, so
+
+  c* = mean(gross excess − borrow) / mean(turnover), in basis points (× 10,000).
+
+  It is `null` in two cases, and the dashboard says which:
+  - no turnover: the strategy didn't trade in the segment;
+  - a numerator ≤ 0: the strategy loses money before costs, so no cost makes it break even.
+- **The grid,** 0, 2, 5, 10, 20, 50 and 100 bps plus the request's own cost, runs from frictionless to the cost of an illiquid stock.
+- **Ruin.** A ruined run has no sweep: clipping the ruin day at −100% makes returns non-linear in c, and another cost would move the ruin day. A higher grid cost can also cause ruin that the run's own cost doesn't. That cost's Sharpe is then `null` for every segment containing its ruin day or starting after it (§6.2's rule, applied per cost).
+- **The warning** fires when the full-period break-even is below twice the request's cost. Real costs are uncertain by at least that factor once spreads and market impact are counted, so such an edge may not exist after costs.
+- *(engine)* KO/PEP pairs, 2015-01-02 to 2025-12-31, defaults: the in-sample Sharpe ratio falls from 0.27 at zero cost to 0.04 at the request's 10 bps and −0.19 at 20 bps; the in-sample break-even is 11.6 bps, so the edge barely covers the cost assumed. Out of sample the strategy loses money before costs (a Sharpe ratio of −0.71 at 0 bps), so the out-of-sample and full-period break-evens are `null`.
+
+### 24. Rolling and calendar statistics (§8.2)
+- **Rolling 1-year Sharpe and beta.** The full-period Sharpe ratio hides when a strategy worked. Each day's value uses the trailing 252 evaluated days, with §8's rules:
+  - the window must hold a position on at least one day. An entry day pays the cost before any position is held, so a window ending on one can have a non-zero standard deviation and no exposure; it is `null` (tested);
+  - neither standard deviation may be below 1e-12.
+
+  The windows are computed with sliding-window views, which give the same numbers as computing each window separately, bit for bit (checked with numpy 2.5). Consecutive windows share 251 of their 252 days, so the series is smooth by construction. A one-year Sharpe ratio has a standard error of about 1.0 (§13 above), so a dip below zero for a few months is weak evidence of anything.
+- **Calendar returns** compound total returns within each month and year of the evaluation window: prod(1 + r) − 1. The months of a year therefore compound exactly to its annual figure (tested). The benchmark is compounded the same way.
+- **Partial periods.** A period is partial when the window doesn't cover every run-calendar day of it. That happens to the first period whenever the window starts after its first trading day.
+  - The last period is also partial after ruin, or when the request's `end` falls before the period's last calendar day.
+  - The rule is conservative: a run ending on Friday 29 October marks October partial unless `end` is 31 October, though no trading day was missed.
+
+### 25. Probabilistic and deflated Sharpe ratios (§9.1)
+- **The problem.** The best of N configurations shows a higher Sharpe ratio than its true one, even when no configuration has any skill: the maximum of N noisy estimates is biased upwards. The deflated Sharpe ratio (DSR, Bailey & López de Prado 2014) asks whether the best result beats what luck alone would produce.
+- **The probabilistic Sharpe ratio (Bailey & López de Prado 2012).** For n iid daily returns with skewness γ₃ and kurtosis γ₄, the estimated daily Sharpe ratio ŜR has standard error
+
+  σ(ŜR) = √((1 − γ₃·ŜR + (γ₄ − 1)/4 · ŜR²) / (n − 1)).
+
+  So PSR(SR*) = Φ((ŜR − SR*) / σ(ŜR)) is the probability that the true Sharpe ratio exceeds SR*.
+  - **Why skewness and kurtosis.** The Sharpe estimate is noisier for negatively skewed and fat-tailed returns. A strategy that earns small, steady gains with occasional crashes looks better than it is, and this formula widens its uncertainty. The engine uses the bias-corrected sample moments, `scipy.stats.skew(x, bias=False)` and `kurtosis(x, fisher=False, bias=False)`.
+  - **Why daily.** The formula counts n daily observations, so ŜR must be the daily Sharpe ratio. Annualizing first would multiply the γ₃·ŜR term by √252 and the ŜR² term by 252.
+- **The expected maximum under no skill.** For N independent standard normal variables, extreme-value theory gives E[max] ≈ (1 − γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e)), with γ the Euler–Mascheroni constant. Scaling by the spread of the trials' daily Sharpe ratios, √V, gives SR₀*: the Sharpe ratio the best trial would show if none had any skill.
+  - It grows with N (tested for N = 2 to 200): more trials, a higher bar.
+  - It is `null` with fewer than 2 trials, or when the trials' Sharpe ratios don't vary (V < 1e-24), because the spread of the grid is all it has to go on.
+- **DSR = PSR(SR₀*),** reported for the request's own cell and for the best cell (the highest IS Sharpe, the first in grid order on a tie).
+  - *(engine)* KO/PEP pairs, 2015-01-02 to 2025-12-31: 20 trials and an SR₀* of 0.42 (annualized). The request's cell (L 60, z 2.0) has a DSR of 0.15 and the best cell (L 20, z 3.0, Sharpe 0.23) 0.30, far below 0.95, the usual bar for calling a result significant. On SPY trend, 2006-01-03 to 2025-12-31, the five trend cells are so alike that SR₀* is only 0.09, and the best cell's DSR (0.65) is little more than its plain PSR against zero.
+- **Calibration** *(prototype, 2026-10-17)*. On 200 seeds of pure-noise prices, with simple returns iid N(0, 1.5%²), rf = 0 and the default 20-cell grid run through `run_strategy` exactly as `run_sensitivity` does, the share of seeds whose best cell had a DSR above 0.95 was:
+
+  | Grid | 0 bps | 10 bps |
+  |---|---:|---:|
+  | Mean reversion | 3.0% | 1.5% |
+  | Pairs (two independent random walks) | 2.5% | 1.5% |
+
+  With 20 independent iid normal trials it was 0.5%. The specification's bound is 10%. The permanent test runs the same mean-reversion grid, vectorized, on its own 200 seeds: 2 pass (1.0%).
+- **Correlated cells pull both ways.** Neighbouring cells are strongly correlated.
+  - That makes N overstate the number of independent trials, which raises the bar, as §9.1 notes.
+  - It also shrinks V, the spread of the trials' Sharpe ratios, which lowers the bar. As the cells approach perfect correlation, V shrinks towards 0 and the DSR approaches the plain PSR against 0, which passes 5% of the time with no skill. (At V < 1e-24 the DSR is `null`.)
+  - Measured, the correlated grids pass more often than independent trials (1.5–3.0% against 0.5%) but stay below the nominal 5%. The DSR remains conservative here, though less so than the N-overstatement argument alone suggests.
 
 ## Limitations
 - **Selection and survivorship bias.** The preset pairs and ETFs were chosen with hindsight: they exist today and are known to be related. A pair that stopped moving together, or a stock that was delisted, never enters the sample, which flatters every pairs result.
@@ -336,13 +413,17 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - Fills happen at the close.
   - The cost is a fixed number of basis points per unit traded: there is no spread model, no market impact, and no limit on trade size relative to volume.
   - That is reasonable for small trades in liquid large caps, and wrong for illiquid names or large size.
-- **No borrow cost for shorts and no financing spread for leverage.**
-  - Both are financed exactly at the T-bill rate. Phase 5 adds a flat borrow fee.
-  - There are no hard-to-borrow names, recalls or margin calls, and ruin has limited liability.
+- **A flat borrow fee, and no financing spread for leverage.**
+  - The borrow fee is one rate for every short and every day. Real fees vary by name and over time: hard-to-borrow stocks can cost several percent a year, and a lender can recall the shares. Short-sale proceeds earn the full T-bill rate, with no rebate spread.
+  - Leverage is financed exactly at the T-bill rate. There are no margin calls, and ruin has limited liability.
+- **The cost sweep holds positions fixed** (§8.1). A trader facing higher costs would trade less, so at high costs the sweep understates what a re-optimized strategy could earn.
 - **The T-bill rate.** ^IRX is based on the 13-week bill's discount rate, which is slightly below its investment yield (by about 0.1 percentage point at a 5% rate), so cash and short proceeds earn slightly too little. Daily accrual is simple (a/252), not compounded.
 - **Daily rebalancing to target weights,** with no cost for drift (§6.1): between signal changes, the model's weights stay constant without trading.
 - **Pairs exits use the rolling z** while the frozen-β spread is held (§5.3), so an exit can fire slightly early or late relative to the spread actually held.
-- **Multiple testing.** The sensitivity grid tests 20 configurations (5 for trend), and a user may try many more by hand. The best cell's Sharpe ratio is biased upwards by the selection itself. The grid outlines the request's own cell, and Phase 5 adds the deflated Sharpe ratio.
+- **Multiple testing.** The sensitivity grid tests 20 configurations (5 for trend), and a user may try many more by hand. The best cell's Sharpe ratio is biased upwards by the selection itself.
+  - The deflated Sharpe ratio corrects for the grid's own trials only. Every configuration tried before, by hand or in earlier runs, is a hidden trial it can't count.
+  - It treats the grid's correlated cells as independent, an approximation whose net effect was conservative in the calibration above (§25).
+- **Rolling statistics overlap.** Consecutive one-year windows share all but one day, so the rolling series looks smoother and more persistent than the evidence behind it.
 - **Tuning while watching OOS results turns OOS into IS.** The engine keeps OOS out of its own selection. But a person who changes parameters until the OOS panel looks good has used OOS for selection. The honest OOS result is the one recorded before looking.
 - **The Sharpe CI assumes iid returns** (Lo 2002). Autocorrelation, volatility clustering and fat tails make the true interval wider, especially for strategies that hold positions for weeks.
 - **Trend following here trades one asset at a time.** The published results come from diversified portfolios of dozens of futures. A single asset's trend Sharpe ratio is much lower and noisier: 0.32 on SPY (§10 above). Phase 7 adds a multi-asset portfolio.
@@ -489,3 +570,20 @@ As Phase 0, item 3 planned, `npm test` is now plain `vitest run`.
    - When the line is hidden, the equity axis rescales to the strategy alone. That makes a low-volatility strategy readable next to a fast-rising benchmark.
    - It only changes what is shown. The request, the response and `benchmark_metrics` are unchanged.
    - It was requested by the user and checked in the browser on a KO/PEP pairs run.
+
+### Phase 5 (approved 2026-10-17)
+1. **The DSR calibration test runs a vectorized copy of the mean-reversion grid (§12, `test_sensitivity.py`).**
+   - Running `run_sensitivity` on 200 seeds takes about 70 s (0.36 s a seed in the prototype), more than the whole suite's 60 s budget.
+   - The test instead builds the default 20-cell grid for all 200 seeds at once, with run_strategy's arithmetic: the rolling z-score, the §5.1 rule, a one-day lag, rf = 0 and no costs. It feeds the result to the same `deflated_sharpe` function the API uses.
+   - It checks the copy against `run_sensitivity` on seed 0: the deflated results compare equal. In the prototype, the copy matched the engine's window returns exactly on 5 seeds × 20 configurations.
+   - It takes 1.5 s.
+2. **"At the break-even cost the Sharpe is 0 or null" is tested as |Sharpe| < 1e-9 or null (§12, item 13).** The mean excess at c* is 0 only up to rounding (the test checks it is below 1e-15), so the Sharpe ratio comes out near 1e-15, not exactly 0.
+3. **The long-only test also covers the vol overlay (§12, item 11, addition).**
+   - With unit weights the long trades match exactly, dates and P&L, as specified.
+   - With sized weights, a direct flip's cost is split by the fraction a/(a + b), which is exact only up to rounding. The overlay case checks the dates exactly and the P&L within 1e-15.
+4. **The KPI grid gains a "Costs" group (§13, view 1).**
+   - Turnover and cost drag move there from the strategy group, next to the new borrow drag and break-even cost.
+   - The break-even tile turns amber below twice the run's cost in every segment. The §8 warning applies to the full period only.
+5. **The cost sweep's axis stretches to a break-even up to 4× the grid's top cost (§13, view 8, addition).** A break-even further out is stated in words instead, so the 0–100 bps sweep isn't squashed into one corner.
+6. **The benchmark toggle also hides the calendar's buy-and-hold column.** This extends "After Phase 4", item 1.
+7. **Page order (§13).** The new views sit next to the views they relate to: rolling statistics and calendar returns after equity and drawdown, and the cost sweep before the sensitivity grid.

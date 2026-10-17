@@ -269,6 +269,7 @@ def test_vol_targeting_tracks_the_target_in_every_regime() -> None:
             t0=t0,
             k=1,
             cost_bps=0.0,
+            borrow_bps=0.0,
             E0=1.0,
             split_date=idx[n // 2],
         )
@@ -362,3 +363,52 @@ def test_sized_weights_are_exactly_zero_when_flat(
     assert flat.any() and (~flat).any()
     assert (run.weights[flat] == 0.0).all().all()
     assert not run.weights.isna().any().any()
+
+
+# ---------------------------------------------------------------- 11. long-only switch (Phase 5)
+
+LONG_ONLY_CASES = [
+    {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40},
+    {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40, "vol_target": 0.10, "vol_refresh": "weekly"},
+    {"strategy": "trend", "tickers": ("X",), "L": 63, "signal_frequency": "daily"},
+    {"strategy": "trend", "tickers": ("X",), "L": 63, "vol_target": 0.10, "vol_refresh": "daily"},
+]
+
+
+@pytest.mark.parametrize("config", LONG_ONLY_CASES, ids=lambda c: f"{c['strategy']}-vol{c.get('vol_target')}")
+def test_long_only_never_holds_a_negative_position(prices: pd.DataFrame, rf: pd.Series, config: dict) -> None:
+    both = run_strategy(prices, rf, StrategyParams(**config))
+    long_only = run_strategy(prices, rf, StrategyParams(**config, allow_short=False))
+    assert (both.signal < 0).any()  # the switch has something to remove
+    assert (long_only.signal >= 0).all() and (long_only.weights >= 0).all().all()
+    assert (long_only.backtest.pos >= 0).all() and (long_only.backtest.w >= 0).all().all()
+    assert (long_only.backtest.trades["side"] == "long").all()
+    # The clip comes after the score: the reported score and t0 are unchanged.
+    assert np.array_equal(both.score.to_numpy(), long_only.score.to_numpy(), equal_nan=True)
+    assert both.t0 == long_only.t0 and both.split_date == long_only.split_date
+
+
+@pytest.mark.parametrize("vol_target", [None, 0.10])
+def test_long_only_keeps_exactly_the_long_trades(
+    prices: pd.DataFrame, rf: pd.Series, vol_target: float | None
+) -> None:
+    # A short lookback and z_exit = 0 make direct flips common: about 120 trades, 25 of them flips.
+    params = StrategyParams(
+        strategy="mean_reversion", tickers=("Y",), L=10, z_entry=1.0, z_exit=0.0, vol_target=vol_target
+    )
+    both = run_strategy(prices, rf, params).backtest.trades
+    long_only = run_strategy(prices, rf, replace(params, allow_short=False)).backtest.trades
+    longs = both.loc[both["side"] == "long"].reset_index(drop=True)
+    flips = (both["entry_date"].iloc[1:].to_numpy() == both["exit_date"].iloc[:-1].to_numpy()).sum()
+    assert len(longs) == len(long_only) >= 30 and flips >= 10  # direct flips were exercised
+    columns = ["side", "segment", "open", "signal_date", "entry_date", "exit_signal_date", "exit_date"]
+    assert longs[[*columns, "holding_days"]].equals(long_only[[*columns, "holding_days"]])
+    if vol_target is None:  # unit weights: a flip's 2c cost splits into exactly c + c
+        assert np.array_equal(longs["pnl"].to_numpy(), long_only["pnl"].to_numpy())
+    else:  # sized weights: the flip's cost split is exact only up to rounding
+        np.testing.assert_allclose(longs["pnl"].to_numpy(), long_only["pnl"].to_numpy(), rtol=0, atol=1e-15)
+
+
+def test_pairs_cannot_be_long_only() -> None:
+    with pytest.raises(ValueError, match="pairs needs a short leg"):
+        StrategyParams(strategy="pairs", tickers=("Y", "X"), L=60, allow_short=False)

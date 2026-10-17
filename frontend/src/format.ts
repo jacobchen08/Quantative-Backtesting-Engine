@@ -94,3 +94,8 @@ export function fmtLag(k: number): string {
 export function fmtMonth(date: string): string {
   return date.slice(0, 7)
 }
+
+/** Basis points: 12.34 -> "12.3 bps". */
+export function fmtBps(x: number | null | undefined, digits = 1): string {
+  return isNum(x) ? `${fixed(x, digits)} bps` : DASH
+}

@@ -1,4 +1,4 @@
-"""Execution lag, daily returns, costs, equity, ruin and trades (§6, §7). Pure (§0, rule 8).
+"""Execution lag, daily returns, costs, borrow fees, equity, ruin and trades (§6, §7). Pure (§0, rule 8).
 
 The execution lag k is applied here and nowhere else (§2.2): the executed position is
 p_t = s_{t-k}, and day t's P&L comes from the position held into day t, p_{t-1} * r_t.
@@ -84,7 +84,8 @@ class BacktestResult:
     w: pd.DataFrame  # executed end-of-day weights, w_t = W_{t-k}
     pos: pd.Series  # executed position, pos_t = s_{t-k}
     gross_held: pd.Series  # sum_i |w_{i,t-1}|: gross exposure held into day t
-    gross_excess: pd.Series  # sum_i w_{i,t-1} (r_{i,t} - rf_t), before costs
+    gross_excess: pd.Series  # sum_i w_{i,t-1} (r_{i,t} - rf_t), before costs and borrow fees
+    borrow: pd.Series  # borrow fee on the short notional held into day t (§6.1)
     turnover: pd.Series  # sum_i |w_{i,t} - w_{i,t-1}|
     cost: pd.Series  # c * turnover, charged on the trade day
     excess: pd.Series  # daily return in excess of rf; clipped on the ruin day
@@ -122,10 +123,11 @@ def run_backtest(
     t0: int,
     k: int,
     cost_bps: float,
+    borrow_bps: float,
     E0: float,
     split_date: date | pd.Timestamp,
 ) -> BacktestResult:
-    """Daily returns, costs, equity, ruin and trades (§6.1, §6.2, §7).
+    """Daily returns, costs, borrow fees, equity, ruin and trades (§6.1, §6.2, §7).
 
     Args:
         R: simple daily returns (decimals), one column per leg. Only the first row may be NaN.
@@ -136,12 +138,14 @@ def run_backtest(
         t0: calendar position of the first non-NaN score (§6.2); t0 + k >= 1.
         k: execution lag in trading days.
         cost_bps: one-way cost per unit of traded notional, per leg, in basis points.
+        borrow_bps: annual fee on the short notional held into each day, in basis points,
+            charged daily at borrow_bps / 10,000 / 252. 0 reproduces the earlier phases exactly.
         E0: initial equity (currency units).
         split_date: an already-resolved split date leaving >= 1 IS and >= 1 OOS evaluated day.
 
     Returns:
-        BacktestResult. total_t = rf_t + sum_i w_{i,t-1} (r_{i,t} - rf_t) - cost_t, where cash
-        and short proceeds earn rf. A flat day's excess return is exactly 0.
+        BacktestResult. total_t = rf_t + sum_i w_{i,t-1} (r_{i,t} - rf_t) - borrow_t - cost_t,
+        where cash and short proceeds earn rf. A flat day's excess return is exactly 0.
 
     Raises:
         TypeError: rf is not a pandas Series.
@@ -150,7 +154,7 @@ def run_backtest(
     if not isinstance(rf, pd.Series):
         raise TypeError(f"rf must be a pandas Series on the run calendar (§2.3), not {type(rf).__name__}")
     t0, k = operator.index(t0), operator.index(k)
-    _validate_inputs(R, W, s, rf, t0, k, cost_bps, E0)
+    _validate_inputs(R, W, s, rf, t0, k, cost_bps, borrow_bps, E0)
     calendar = R.index
     n = len(calendar)
     e = t0 + k
@@ -173,9 +177,11 @@ def run_backtest(
     if not np.isfinite(R.to_numpy()).all() or not np.isfinite(rf.to_numpy()).all():
         raise ValueError("R (after its first row) and rf must be finite")  # .sum() would hide NaN as 0
     gross_excess = (w_prev * R.sub(rf, axis=0)).sum(axis=1)
+    shorts = (-w_prev).clip(lower=0).sum(axis=1)  # short notional held into day t
+    borrow = (borrow_bps / 10_000 / 252) * shorts  # charged daily on it
     turnover = (w - w_prev).abs().sum(axis=1)  # every leg counts
     cost = c * turnover  # charged on the trade day
-    excess = gross_excess - cost  # daily return in excess of rf
+    excess = gross_excess - borrow - cost  # daily return in excess of rf
     total = rf + excess  # daily total return (cash earns rf)
 
     # §7: trades are runs of non-zero, same-sign executed position.
@@ -200,7 +206,7 @@ def run_backtest(
     a = w_prev.abs().sum(axis=1)
     b = w.abs().sum(axis=1)
     exit_frac = (a / (a + b).where(a + b > 0)).fillna(0.0)
-    to_held = gross_excess - cost * exit_frac + credit  # attributed to held_id
+    to_held = gross_excess - borrow - cost * exit_frac + credit  # attributed to held_id
     to_trade = -(cost - cost * exit_frac)  # attributed to trade_id
     window = slice(e, stop)  # every day before e is flat with zero weights
     pnl = (
@@ -228,6 +234,7 @@ def run_backtest(
         pos=pos.rename("position"),
         gross_held=a.rename("gross_held"),
         gross_excess=gross_excess.rename("gross_excess"),
+        borrow=borrow.rename("borrow"),
         turnover=turnover.rename("turnover"),
         cost=cost.rename("cost"),
         excess=excess.rename("excess"),
@@ -250,7 +257,15 @@ def run_backtest(
 
 
 def _validate_inputs(
-    R: pd.DataFrame, W: pd.DataFrame, s: pd.Series, rf: pd.Series, t0: int, k: int, cost_bps: float, E0: float
+    R: pd.DataFrame,
+    W: pd.DataFrame,
+    s: pd.Series,
+    rf: pd.Series,
+    t0: int,
+    k: int,
+    cost_bps: float,
+    borrow_bps: float,
+    E0: float,
 ) -> None:
     """§6.1 entry checks, plus three consistency checks the trade bookkeeping relies on."""
     if not (W.index.equals(R.index) and s.index.equals(R.index) and rf.index.equals(R.index)):
@@ -272,6 +287,8 @@ def _validate_inputs(
         raise ValueError("W must be exactly 0 on days the signal is flat")
     if not cost_bps >= 0:
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
+    if not borrow_bps >= 0:
+        raise ValueError(f"borrow_bps must be >= 0, got {borrow_bps}")
     if not E0 > 0:
         raise ValueError(f"E0 must be > 0, got {E0}")
 

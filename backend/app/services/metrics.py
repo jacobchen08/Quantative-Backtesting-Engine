@@ -1,17 +1,19 @@
-"""Performance metrics and warnings (§8). Pure (§0, rule 8).
+"""Performance metrics, the cost sweep, rolling and calendar statistics, and warnings (§8).
 
-Metric functions take the daily values of one segment (numpy arrays or pandas Series) as
-decimals: 0.01 = 1%. A statistic that is undefined returns None, never NaN or inf (§2.4).
-Standard deviations use ddof=1.
+Pure (§0, rule 8). Metric functions take the daily values of one segment (numpy arrays or
+pandas Series) as decimals: 0.01 = 1%. A statistic that is undefined returns None, never NaN
+or inf (§2.4). Standard deviations use ddof=1.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 TRADING_DAYS = 252
 STD_FLOOR = 1e-12  # a std (or downside deviation) below this makes a ratio undefined
@@ -20,6 +22,9 @@ MIN_CLOSED_TRADES = 10
 CAP_WARNING_SHARE = 0.25
 COINT_ALPHA = 0.05
 SEGMENT_LABELS = {"is": "In-sample", "oos": "Out-of-sample", "full": "Full period"}
+COST_SWEEP_BPS = (0.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0)  # §8.1, plus the request's own cost
+ROLLING_DAYS = 252  # §8.2: one year of evaluated days
+BREAK_EVEN_MULTIPLE = 2  # §8: warn when the full-window break-even is below 2x the request's cost
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,7 @@ class Metrics:
     avg_holding_days: float | None
     ann_turnover: float | None
     ann_cost_drag: float | None
+    ann_borrow_drag: float | None
     avg_gross_exposure: float
 
 
@@ -185,6 +191,7 @@ def segment_metrics(
     gross_held: object,
     turnover: object,
     cost: object,
+    borrow: object,
     trades: pd.DataFrame,
 ) -> Metrics:
     """Strategy metrics for one segment (§8).
@@ -194,7 +201,7 @@ def segment_metrics(
         market_excess: SPY's daily excess return r_SPY - rf on the same days.
         held: True on days whose held_id is not null (a position earns that day's P&L).
         gross_held: sum_i |w_{i,t-1}| on each day.
-        turnover, cost: daily turnover and cost (fractions of equity).
+        turnover, cost, borrow: daily turnover, trading cost and borrow fee (fractions of equity).
         trades: the trades entered in this segment, with columns open, pnl and holding_days.
 
     The segment's equity is rebased to its own baseline, so total_return, CAGR and the
@@ -213,6 +220,7 @@ def segment_metrics(
         avg_holding_days=float(closed["holding_days"].mean()) if n_closed else None,
         ann_turnover=float(np.mean(_arr(turnover)) * TRADING_DAYS),
         ann_cost_drag=float(np.mean(_arr(cost)) * TRADING_DAYS),
+        ann_borrow_drag=float(np.mean(_arr(borrow)) * TRADING_DAYS),
         avg_gross_exposure=float(np.mean(_arr(gross_held))),
     )
 
@@ -236,8 +244,179 @@ def benchmark_metrics(*, r: object, rf: object, market_excess: object) -> Metric
         avg_holding_days=None,
         ann_turnover=None,
         ann_cost_drag=None,
+        ann_borrow_drag=None,
         avg_gross_exposure=1.0,
     )
+
+
+# ---------------------------------------------------------------- cost sweep (§8.1)
+
+
+@dataclass(frozen=True)
+class CostSensitivity:
+    """Sharpe ratio against one-way cost, from one run with positions held fixed (§8.1).
+
+    cost_bps: the sweep grid in basis points, ascending, including the request's own cost.
+    sharpe: per segment ("is", "oos", "full"), one annualized Sharpe per cost; None where the
+        §8 Sharpe is undefined, or where the segment contains (or starts after) that cost's
+        ruin day.
+    break_even_bps: per segment, the one-way cost at which the mean excess return is 0, in
+        basis points; None when the segment has no turnover or loses money before costs.
+    """
+
+    cost_bps: tuple[float, ...]
+    sharpe: dict[str, list[float | None]]
+    break_even_bps: dict[str, float | None]
+
+
+def cost_sweep(
+    *,
+    gross_excess: object,
+    borrow: object,
+    turnover: object,
+    rf: object,
+    held: object,
+    segments: dict[str, tuple[int, int]],
+    e: int,
+    cost_bps: float,
+) -> CostSensitivity:
+    """Sharpe at each cost of the §8.1 grid, and the break-even cost, per segment.
+
+    Positions don't depend on the cost, so the daily excess return at a one-way cost of c is
+    exactly gross_excess - borrow - c * turnover, and one run gives the whole sweep. At the
+    request's own cost this is the run's own excess return, computed the same way (§6.1).
+
+    Args:
+        gross_excess, borrow, turnover, rf: daily values on the whole run calendar (§6.1).
+        held: True on days whose held_id is not null.
+        segments: calendar positions [start, end) of "is", "oos" and "full" (§6.3). Only a run
+            that was not ruined has a cost sweep, so every segment exists.
+        e: the first evaluated day. A cost's ruin day r_c is the first day from e on whose
+            unclipped total return at that cost is <= -1.
+        cost_bps: the request's own one-way cost in basis points.
+    """
+    ge, bw, to = _arr(gross_excess), _arr(borrow), _arr(turnover)
+    rate, inv = _arr(rf), np.asarray(held, dtype=bool)
+    grid = tuple(sorted({*COST_SWEEP_BPS, float(cost_bps)}))
+    sharpe_by_cost: dict[str, list[float | None]] = {name: [] for name in segments}
+    for bps in grid:
+        excess = ge - bw - (bps / 10_000) * to  # the backtester's own expression
+        hits = np.flatnonzero(rate[e:] + excess[e:] <= -1.0)
+        ruin = e + int(hits[0]) if hits.size else None
+        for name, (a, b) in segments.items():
+            if ruin is not None and ruin < b:  # the segment contains r_c or starts after it
+                sharpe_by_cost[name].append(None)
+            else:
+                sharpe_by_cost[name].append(sharpe(excess[a:b], exposed=bool(inv[a:b].any())))
+    break_even: dict[str, float | None] = {}
+    for name, (a, b) in segments.items():
+        edge, mean_turnover = float(np.mean(ge[a:b] - bw[a:b])), float(np.mean(to[a:b]))
+        ok = mean_turnover > 0 and edge > 0  # else: no trades, or losing before costs
+        break_even[name] = edge / mean_turnover * 10_000 if ok else None
+    return CostSensitivity(cost_bps=grid, sharpe=sharpe_by_cost, break_even_bps=break_even)
+
+
+# ---------------------------------------------------------------- rolling and calendar statistics (§8.2)
+
+
+def rolling_sharpe_beta(
+    excess: object, market_excess: object, held: object, window: int = ROLLING_DAYS
+) -> tuple[np.ndarray, np.ndarray]:
+    """Trailing-window Sharpe ratio and beta to SPY over the evaluated days (§8.2).
+
+    Args:
+        excess: the strategy's daily excess returns on the evaluated days, in order.
+        market_excess: SPY's daily excess return r_SPY - rf on the same days.
+        held: True on days whose held_id is not null.
+        window: the trailing window in evaluated days (min_periods = window).
+
+    Returns:
+        (sharpe, beta), arrays as long as the inputs. The value on evaluated day i uses days
+        i - window + 1 .. i: the annualized §8 Sharpe and the OLS slope on SPY's excess return.
+        NaN before the window-th day and where §8's null rules apply: no held day in the
+        window, or a standard deviation below 1e-12.
+    """
+    x, m, inv = _arr(excess), _arr(market_excess), np.asarray(held, dtype=bool)
+    n = x.size
+    sharpe_out, beta_out = np.full(n, np.nan), np.full(n, np.nan)
+    if n < window:
+        return sharpe_out, beta_out
+    X, M = sliding_window_view(x, window), sliding_window_view(m, window)  # one row per window, no copy
+    held_days = np.convolve(inv.astype(np.int64), np.ones(window, dtype=np.int64), mode="valid")
+    mean_x, sx, sm = X.mean(axis=1), X.std(axis=1, ddof=1), M.std(axis=1, ddof=1)
+    ok = (held_days > 0) & (sx >= STD_FLOOR)
+    sharpe_out[window - 1 :] = np.where(ok, mean_x / np.where(ok, sx, 1.0), np.nan) * math.sqrt(TRADING_DAYS)
+    cov = np.sum((X - mean_x[:, None]) * (M - M.mean(axis=1, keepdims=True)), axis=1) / (window - 1)
+    ok_beta = ok & (sm >= STD_FLOOR)
+    beta_out[window - 1 :] = np.where(ok_beta, cov / np.where(ok_beta, sm, 1.0) ** 2, np.nan)
+    return sharpe_out, beta_out
+
+
+@dataclass(frozen=True)
+class PeriodReturn:
+    """Compounded total returns over a calendar month (month 1-12) or year (month None)."""
+
+    year: int
+    month: int | None
+    strategy: float
+    benchmark: float
+    partial: bool
+
+
+def calendar_returns(
+    *,
+    dates: pd.DatetimeIndex,
+    total: object,
+    benchmark: object,
+    calendar: pd.DatetimeIndex,
+    end: date,
+    ruined: bool,
+) -> tuple[list[PeriodReturn], list[PeriodReturn]]:
+    """Monthly and annual total returns of the evaluation window (§8.2).
+
+    Args:
+        dates: the evaluated days, from the first evaluated day to the last one (the ruin
+            day if the run was ruined).
+        total, benchmark: the strategy's and the benchmark's daily total returns on those days.
+        calendar: the whole run calendar, including the warm-up and any days after ruin.
+        end: the resolved end date of the request.
+        ruined: whether the run ended by ruin.
+
+    Returns:
+        (monthly, annual), in date order. Each return is prod(1 + r) - 1 over the period's
+        evaluated days. A period is partial when the window doesn't include every run-calendar
+        day of it. The window's last period is also partial when the run ended by ruin, or when
+        `end` falls before the period's last calendar day.
+    """
+    growth = pd.DataFrame({"strategy": 1.0 + _arr(total), "benchmark": 1.0 + _arr(benchmark)}, index=dates)
+    out: list[list[PeriodReturn]] = []
+    for freq in ("M", "Y"):
+        periods = dates.to_period(freq)
+        compounded = growth.groupby(periods).prod() - 1.0
+        in_window = growth.groupby(periods).size()
+        on_calendar = pd.Series(0, index=calendar.to_period(freq)).groupby(level=0).size()
+        complete = in_window.to_numpy() == on_calendar.reindex(compounded.index).to_numpy()
+        last = compounded.index[-1]
+        complete[-1] &= not (ruined or end < last.end_time.date())
+        out.append(
+            [
+                PeriodReturn(
+                    year=period.year,
+                    month=period.month if freq == "M" else None,
+                    strategy=float(s_ret),
+                    benchmark=float(b_ret),
+                    partial=not bool(ok),
+                )
+                for period, s_ret, b_ret, ok in zip(
+                    compounded.index,
+                    compounded["strategy"].to_numpy(),
+                    compounded["benchmark"].to_numpy(),
+                    complete,
+                    strict=True,
+                )
+            ]
+        )
+    return out[0], out[1]
 
 
 def build_warnings(
@@ -249,6 +428,8 @@ def build_warnings(
     coint_p_is: float | None = None,
     collinear_is: bool = False,
     collinear_oos: bool = False,
+    break_even_full_bps: float | None = None,
+    cost_bps: float = 0.0,
 ) -> list[str]:
     """The §8 warnings that the pure core can detect.
 
@@ -289,5 +470,10 @@ def build_warnings(
         out.append(
             f"The position was at the leverage cap on {pct_at_cap:.0%} of invested days (more than "
             f"{CAP_WARNING_SHARE:.0%}): the volatility target is not reachable within max_leverage."
+        )
+    if break_even_full_bps is not None and break_even_full_bps < BREAK_EVEN_MULTIPLE * cost_bps:
+        out.append(
+            f"The full-period break-even cost is {break_even_full_bps:.1f} bps, below twice the request's "
+            f"{cost_bps:g} bps: the strategy's edge is less than twice its trading cost."
         )
     return out

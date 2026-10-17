@@ -1,5 +1,5 @@
-// Equity, drawdown and signal charts (§13). They all draw the same rows (one per `series` date) and
-// share one syncId, so hovering a day highlights that day in every chart.
+// Equity, drawdown, rolling-statistics and signal charts (§13). They all draw the same rows (one per
+// `series` date) and share one syncId, so hovering a day highlights that day in every chart.
 import { memo, useMemo, type ReactNode } from 'react'
 import {
   Area,
@@ -373,6 +373,44 @@ export const SignalPanel = memo(function SignalPanel(props: {
           </LineChart>
         </>
       )}
+    </Panel>
+  )
+})
+
+// ---------------------------------------------------------------- rolling statistics (§8.2)
+
+export const RollingPanel = memo(function RollingPanel(props: { rows: SeriesRow[]; firstOos: number }) {
+  const { rows, firstOos } = props
+  const zero = (
+    <Key color={COLORS.exitBand} dashed>
+      zero
+    </Key>
+  )
+  return (
+    <Panel
+      title="Rolling statistics"
+      subtitle="Trailing 252 evaluated days (one year). Empty before the first full year, and in windows without a position."
+    >
+      <ChartTitle legend={zero}>Rolling 1-year Sharpe</ChartTitle>
+      <LineChart responsive width="100%" height={150} data={rows} syncId={BACKTEST_SYNC_ID} margin={CHART_MARGIN}>
+        <CartesianGrid stroke={COLORS.grid} vertical={false} />
+        {dateAxis()}
+        <YAxis width={Y_WIDTH} tick={AXIS_TICK} stroke={COLORS.axis} tickLine={false} domain={['auto', 'auto']} tickFormatter={(v: number) => fmtNum(v, 1)} />
+        <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={numTip} />
+        {oosMarks(rows, firstOos, false)}
+        <ReferenceLine y={0} stroke={COLORS.exitBand} strokeDasharray="2 3" />
+        <Line dataKey="rollingSharpe" name="Rolling Sharpe" stroke={COLORS.strategy} strokeWidth={1} dot={false} isAnimationActive={false} />
+      </LineChart>
+      <ChartTitle legend={zero}>Rolling 1-year beta to SPY</ChartTitle>
+      <LineChart responsive width="100%" height={130} data={rows} syncId={BACKTEST_SYNC_ID} margin={CHART_MARGIN}>
+        <CartesianGrid stroke={COLORS.grid} vertical={false} />
+        {dateAxis()}
+        <YAxis width={Y_WIDTH} tick={AXIS_TICK} stroke={COLORS.axis} tickLine={false} domain={['auto', 'auto']} tickFormatter={(v: number) => fmtNum(v, 2)} />
+        <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={numTip} />
+        {oosMarks(rows, firstOos, false)}
+        <ReferenceLine y={0} stroke={COLORS.exitBand} strokeDasharray="2 3" />
+        <Line dataKey="rollingBeta" name="Rolling beta" stroke={COLORS.score} strokeWidth={1} dot={false} isAnimationActive={false} />
+      </LineChart>
     </Panel>
   )
 })

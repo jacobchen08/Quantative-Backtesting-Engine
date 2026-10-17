@@ -99,6 +99,7 @@ def test_segment_metrics_on_a_hand_built_segment() -> None:
         gross_held=np.array([1.0, 1.0, 0.0, 2.0]),
         turnover=turnover,
         cost=0.001 * turnover,
+        borrow=np.array([0.0002, 0.0001, 0.0, 0.0001]),
         trades=trades,
     )
     assert m.n_days == 4
@@ -107,6 +108,7 @@ def test_segment_metrics_on_a_hand_built_segment() -> None:
     assert m.pct_days_in_market == 0.75
     assert (m.n_closed_trades, m.n_open_trades, m.win_rate, m.avg_holding_days) == (2, 1, 0.5, 2.0)
     assert m.ann_turnover == pytest.approx(252.0) and m.ann_cost_drag == pytest.approx(0.252)
+    assert m.ann_borrow_drag == pytest.approx(0.0001 * 252, rel=1e-12)  # mean(borrow) * 252
     assert m.avg_gross_exposure == 1.0
 
 
@@ -119,6 +121,7 @@ def test_no_trades_give_a_null_win_rate() -> None:
         gross_held=np.zeros(5),
         turnover=np.zeros(5),
         cost=np.zeros(5),
+        borrow=np.zeros(5),
         trades=NO_TRADES,
     )
     assert (m.n_closed_trades, m.n_open_trades, m.win_rate, m.avg_holding_days) == (0, 0, None, None)
@@ -129,7 +132,7 @@ def test_benchmark_metrics_have_null_trade_and_cost_fields() -> None:
     r = np.random.default_rng(2).normal(0.0005, 0.01, 100)
     m = metrics.benchmark_metrics(r=r, rf=np.full(100, 0.0001), market_excess=r - 0.0001)
     assert (m.n_closed_trades, m.n_open_trades, m.win_rate, m.avg_holding_days) == (None, None, None, None)
-    assert (m.ann_turnover, m.ann_cost_drag) == (None, None)
+    assert (m.ann_turnover, m.ann_cost_drag, m.ann_borrow_drag) == (None, None, None)
     assert (m.pct_days_in_market, m.avg_gross_exposure) == (1.0, 1.0)
     assert m.beta_spy == pytest.approx(1.0) and m.corr_spy == pytest.approx(1.0)
 
@@ -168,3 +171,16 @@ def test_warnings() -> None:
         coint_p_is=0.01,
     )
     assert quiet == []
+
+
+def test_the_break_even_warning() -> None:
+    base = metrics.benchmark_metrics(
+        r=np.array([0.01, -0.01]), rf=np.zeros(2), market_excess=np.array([0.01, -0.01])
+    )
+    many = replace(base, n_closed_trades=12)
+    common = {"metrics": {"is": many, "oos": None, "full": many}, "trades": NO_TRADES, "ruin_date": None}
+    low = metrics.build_warnings(**common, pct_at_cap=None, break_even_full_bps=15.0, cost_bps=10.0)
+    assert len(low) == 1 and "15.0 bps" in low[0]
+    assert "the strategy's edge is less than twice its trading cost" in low[0]
+    for be in (20.0, None):  # "below" is strict; a null break-even is skipped
+        assert metrics.build_warnings(**common, pct_at_cap=None, break_even_full_bps=be, cost_bps=10.0) == []
