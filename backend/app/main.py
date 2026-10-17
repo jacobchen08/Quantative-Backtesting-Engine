@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app import __version__
 from app.config import settings
 from app.database import Base, engine, get_session
+from app.diagnostics_cache import DiagnosticsCache
 from app.models import BacktestRun  # importing the models also registers every table on Base
 from app.schemas import (
     BacktestRequest,
@@ -39,6 +40,10 @@ from app.services.monte_carlo import MonteCarloInputError
 logging.basicConfig(level=settings.log_level)
 
 SessionDep = Annotated[Session, Depends(get_session)]
+
+# The two Engle–Granger tests dominate a warm pairs backtest, and they don't depend on z, costs or
+# the hedge mode, so repeated requests on the same data reuse them (§14).
+diagnostics_cache = DiagnosticsCache()
 
 
 @asynccontextmanager
@@ -102,7 +107,7 @@ def backtest(request: BacktestRequest, session: SessionDep) -> dict[str, Any]:
     """Run one backtest and store it in backtest_runs."""
     market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
     run = pipeline.run_strategy(market.prices, market.rf, request.to_params())
-    report = pipeline.build_report(run)
+    report = pipeline.build_report(run, pairs_diagnostics=diagnostics_cache.get)
     payload = backtest_payload(
         report, {**request.resolved(), "rf_source": request.rf_source()}, market.warnings
     )

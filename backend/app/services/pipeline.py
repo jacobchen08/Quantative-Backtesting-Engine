@@ -7,6 +7,7 @@ calendar; results go out as dataclasses. run_strategy is the single place that r
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Literal
@@ -281,8 +282,18 @@ class BacktestReport:
     warnings: list[str]
 
 
-def build_report(run: StrategyRun) -> BacktestReport:
-    """Metrics per segment, benchmark, sizing, pairs diagnostics, warnings and chart series."""
+def build_report(
+    run: StrategyRun,
+    *,
+    pairs_diagnostics: Callable[[pd.Series, pd.Series, pd.Timestamp], PairsDiagnostics] = (
+        stats.pairs_diagnostics
+    ),
+) -> BacktestReport:
+    """Metrics per segment, benchmark, sizing, pairs diagnostics, warnings and chart series.
+
+    pairs_diagnostics computes the §5.4 diagnostics from the Y and X adjusted closes and the
+    split date. The API passes its diagnostics cache (§14), which returns the same result.
+    """
     p, bt = run.params, run.backtest
     legs = list(p.tickers)
     pairs = p.strategy == "pairs"
@@ -326,7 +337,7 @@ def build_report(run: StrategyRun) -> BacktestReport:
 
     diagnostics = None
     if pairs:
-        diagnostics = stats.pairs_diagnostics(run.prices[legs[0]], run.prices[legs[1]], bt.split_date)
+        diagnostics = pairs_diagnostics(run.prices[legs[0]], run.prices[legs[1]], bt.split_date)
 
     warnings = metrics.build_warnings(
         metrics=seg_metrics,

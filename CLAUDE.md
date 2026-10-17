@@ -1489,7 +1489,7 @@ A read-only build of the dashboard that runs without a backend. It is deployed t
 - **Backtest latency (Phase 4).** The Phase 2 check took about 0.47 s end to end for KO/PEP. About 132 ms of that was the two Engle–Granger tests.
   - `bench.py` reports the pairs backtest broken down by stage: loading, `run_strategy`, diagnostics, report and serialization. It also reports the backtest repeated with only L or z_entry changed.
   - If the target is missed, add a **diagnostics cache** in the API layer, keyed by the tickers, the IS and OOS diagnostic windows, and a SHA-256 of the two adjusted-close arrays over those windows. Keep at most 256 entries, least recently used first out. `stats.py` stays pure.
-  - The diagnostics don't depend on L, z or costs, so the cache speeds up parameter iteration, which is the common case. It can't speed up the first request on new data, and the README must report both numbers.
+  - The diagnostics depend only on the two legs' prices and the split date, not on z, costs or the hedge mode, so the cache speeds up parameter iteration, which is the common case. Under the default 70% split, though, L and `execution_lag` (and, with the overlay on, `vol_halflife`) move t₀ and with it the split date, so changing them misses the cache unless `split_date` is set (measured, Phase 4). It can't speed up the first request on new data, and the README must report both numbers.
 - **Memory.** Monte Carlo peaks at about 200 MB at the API caps, including the stationary bootstrap's per-chunk temporaries (§10.7).
 - **Tests.** No network, and the pytest suite finishes in under 60 s. The browser tests (§12) are separate and have no such budget.
 

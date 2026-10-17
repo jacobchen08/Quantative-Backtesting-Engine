@@ -23,7 +23,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base, get_session, make_engine
-from app.main import app
+from app.main import app, diagnostics_cache
 from app.services import calendar, data_loader
 
 N_DAYS = 1000
@@ -180,8 +180,10 @@ def session(db_engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture
 def client(db_engine: Engine) -> Iterator[TestClient]:
-    """A TestClient whose requests use the temp database. The app's lifespan doesn't run."""
+    """A TestClient whose requests use the temp database and start with an empty diagnostics
+    cache. The app's lifespan doesn't run."""
     factory = sessionmaker(bind=db_engine, expire_on_commit=False)
+    diagnostics_cache.clear()
 
     def override() -> Iterator[Session]:
         with factory() as s:

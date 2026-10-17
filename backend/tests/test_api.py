@@ -16,10 +16,11 @@ from sqlalchemy.orm import Session
 from yfinance.exceptions import YFRateLimitError
 
 from app import __version__
-from app.main import app
+from app.main import app, diagnostics_cache
 from app.models import BacktestRun
 from app.schemas import BacktestResponse, MonteCarloResponse, SensitivityResponse
 from app.serialization import to_jsonable
+from app.services import stats
 
 START, END = "2018-01-01", "2021-12-31"
 SMALL_MC = {"n_paths": 1000, "horizon": 21}
@@ -258,6 +259,44 @@ def test_only_backtests_are_stored(client: TestClient, db_engine: Engine) -> Non
     post(client, "/api/sensitivity", request)
     post(client, "/api/monte-carlo", {"source": "strategy", "backtest": request, **SMALL_MC})
     assert count_runs(db_engine) == 1
+
+
+# ---------------------------------------------------------------- diagnostics cache (§14)
+
+
+def test_pairs_diagnostics_are_reused_while_their_inputs_are_unchanged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The §14 diagnostics cache: keyed on the legs' data and the split date, nothing else."""
+    split_dates = []
+    real = stats.pairs_diagnostics
+
+    def counting(y_close: pd.Series, x_close: pd.Series, split_date: pd.Timestamp) -> object:
+        split_dates.append(split_date)
+        return real(y_close, x_close, split_date)
+
+    monkeypatch.setattr(stats, "pairs_diagnostics", counting)
+    base = {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    first = post(client, "/api/backtest", base)
+    for change in ({"z_entry": 2.5}, {"z_exit": 0.0}, {"cost_bps": 50}, {"hedge_mode": "rolling"}):
+        assert post(client, "/api/backtest", {**base, **change})["diagnostics"] == first["diagnostics"]
+    assert len(split_dates) == 1
+
+    # Under the default 70% split, a new L moves t0 and with it the split date: a new entry.
+    moved = post(client, "/api/backtest", {**base, "L": 90})
+    assert moved["resolved"]["split_date"] != first["resolved"]["split_date"]
+    assert len(split_dates) == 2
+    # With split_date fixed, L no longer changes the inputs.
+    for L in (40, 120):
+        post(client, "/api/backtest", {**base, "L": L, "split_date": first["resolved"]["split_date"]})
+    assert len(split_dates) == 2
+
+    # A cached response is identical to a freshly computed one, apart from the run id.
+    cached = post(client, "/api/backtest", {**base, "z_entry": 3.0})
+    diagnostics_cache.clear()
+    fresh = post(client, "/api/backtest", {**base, "z_entry": 3.0})
+    assert len(split_dates) == 3
+    assert {**cached, "run_id": None} == {**fresh, "run_id": None}
 
 
 # ---------------------------------------------------------------- ignored fields
