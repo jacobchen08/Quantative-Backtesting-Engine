@@ -1,7 +1,8 @@
 // Dashboard shell: the sidebar holds the settings, the main panel the views (§13). A Run sends the
-// backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel.
+// backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel. The
+// walk-forward goes out only from its own panel's button.
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ApiError, postBacktest, postMonteCarlo, postSensitivity } from './api'
+import { ApiError, postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
 import { EquityPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
 import { CalendarPanel } from './components/CalendarPanel'
 import { CostSweepPanel } from './components/CostSweepPanel'
@@ -11,7 +12,8 @@ import { SensitivityHeatmap } from './components/SensitivityHeatmap'
 import { Sidebar } from './components/Sidebar'
 import { TradesTable } from './components/TradesTable'
 import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
-import { buildRequests, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
+import { WalkForwardPanel } from './components/WalkForwardPanel'
+import { buildRequests, buildWalkForward, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
 import type { Async } from './state'
 import { assumptionLines, benchmarkName, firstOosIndex, seriesRows } from './transform'
 import type {
@@ -20,6 +22,7 @@ import type {
   ResolvedBacktestRun,
   SegmentKey,
   SensitivityResponse,
+  WalkForwardResponse,
 } from './types'
 
 function failure(error: unknown): { status: 'error'; detail: string; httpStatus: number } {
@@ -78,7 +81,8 @@ function EmptyState() {
       <p className="text-neutral-200">No run yet.</p>
       <p>
         Pick a strategy and tickers in the sidebar, then press <span className="text-emerald-400">Run</span>. A run sends
-        the backtest first, then the sensitivity grid and the Monte Carlo simulation.
+        the backtest first, then the sensitivity grid and the Monte Carlo simulation. The walk-forward has its own
+        button in its panel.
       </p>
       <p className="text-neutral-500">Nothing is requested until you press Run.</p>
     </div>
@@ -92,9 +96,12 @@ export default function App() {
   const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: 'idle' })
   const [sensitivity, setSensitivity] = useState<Async<SensitivityResponse>>({ status: 'idle' })
   const [monteCarlo, setMonteCarlo] = useState<Async<MonteCarloResponse>>({ status: 'idle' })
+  const [walkForward, setWalkForward] = useState<Async<WalkForwardResponse>>({ status: 'idle' })
+  const [walkForwardSent, setWalkForwardSent] = useState<string | null>(null) // the request's JSON
   const [showBenchmark, setShowBenchmark] = useState(true) // kept across runs
   const [segment, setSegment] = useState<SegmentKey>('full') // the KPI toggle; the cost sweep follows it
   const inFlight = useRef<AbortController | null>(null)
+  const walkForwardInFlight = useRef<AbortController | null>(null)
 
   async function run() {
     const built = buildRequests(form)
@@ -137,6 +144,33 @@ export default function App() {
       (error: unknown) => !signal.aborted && setMonteCarlo(failure(error)),
     )
   }
+
+  // The walk-forward reruns the whole grid, so only its own button sends it (§13). A new Run leaves
+  // its result in place, marked stale when the sidebar no longer builds the same request.
+  async function runWalkForward() {
+    const built = buildWalkForward(form)
+    if (!built.ok) {
+      setWalkForward({ status: 'error', detail: built.error, httpStatus: 0 })
+      return
+    }
+    walkForwardInFlight.current?.abort()
+    const controller = new AbortController()
+    walkForwardInFlight.current = controller
+    setWalkForwardSent(JSON.stringify(built.request))
+    setWalkForward({ status: 'loading' })
+    try {
+      const data = await postWalkForward(built.request, controller.signal)
+      if (!controller.signal.aborted) setWalkForward({ status: 'done', data })
+    } catch (error) {
+      if (!controller.signal.aborted) setWalkForward(failure(error))
+    }
+  }
+
+  const walkForwardStale = useMemo(() => {
+    if (walkForward.status !== 'done') return false
+    const built = buildWalkForward(form)
+    return !built.ok || JSON.stringify(built.request) !== walkForwardSent
+  }, [walkForward, walkForwardSent, form])
 
   const onUseSeed = useCallback((seed: number) => setForm((f) => ({ ...f, mcSeed: String(seed) })), [])
 
@@ -210,6 +244,15 @@ export default function App() {
         {guard('Trades', <TradesTable trades={bt.trades} pairs={bt.resolved.strategy === 'pairs'} />)}
         {guard('Cost sweep', <CostSweepPanel backtest={bt} segment={segment} />)}
         {guard('Sensitivity', <SensitivityHeatmap state={sensitivity} />)}
+        {guard(
+          'Walk-forward',
+          <WalkForwardPanel
+            state={walkForward}
+            onRun={() => void runWalkForward()}
+            stale={walkForwardStale}
+            showBenchmark={showBenchmark}
+          />,
+        )}
         {guard('Monte Carlo', <MonteCarloPanel state={monteCarlo} onUseSeed={onUseSeed} />)}
         <AssumptionsFooter resolved={bt.resolved} />
       </>

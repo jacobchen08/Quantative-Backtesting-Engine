@@ -78,6 +78,11 @@ export function fmtMs(ms: number | null | undefined): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`
 }
 
+/** An annual drag as a decimal: 0.00106 -> "0.11%/yr". */
+export function fmtPerYear(x: number | null | undefined): string {
+  return isNum(x) ? `${fmtPct(x, 2)}/yr` : DASH
+}
+
 /** Annual turnover in multiples of equity: 2.04 -> "2.0×/yr". */
 export function fmtTurnover(x: number | null | undefined): string {
   return isNum(x) ? `${fixed(x, 1)}×/yr` : DASH

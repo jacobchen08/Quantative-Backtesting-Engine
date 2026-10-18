@@ -12,7 +12,15 @@ import pytest
 from app.services import metrics
 from app.services.backtester import BacktestResult, InsufficientDataError, resolve_split, run_backtest
 from app.services.monte_carlo import MonteCarloInputError
-from app.services.pipeline import StrategyParams, StrategyRun, build_report, run_strategy, strategy_mc_returns
+from app.services.pipeline import (
+    StrategyParams,
+    StrategyRun,
+    WalkForwardResult,
+    build_report,
+    run_strategy,
+    run_walk_forward,
+    strategy_mc_returns,
+)
 
 OVERLAYS = [None, "daily", "weekly", "monthly"]
 
@@ -71,6 +79,18 @@ def _outputs(run: StrategyRun) -> dict[str, pd.Series | pd.DataFrame]:
     return out
 
 
+def _perturb_after(
+    prices: pd.DataFrame, rf: pd.Series, cut: int, rng: np.random.Generator
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Prices and rf multiplied by random lognormal noise on every date strictly after position cut."""
+    future = slice(cut + 1, None)
+    noisy = prices.copy()
+    noisy.iloc[future] *= np.exp(rng.normal(0.0, 0.05, noisy.iloc[future].shape))
+    noisy_rf = rf.copy()
+    noisy_rf.iloc[future] *= np.exp(rng.normal(0.0, 0.2, len(rf) - cut - 1))
+    return noisy, noisy_rf
+
+
 @pytest.mark.parametrize("config", PERTURBATION_CASES)
 def test_no_lookahead_under_future_perturbation(prices: pd.DataFrame, varying_rf, config: dict) -> None:
     params = StrategyParams(**config)
@@ -78,11 +98,7 @@ def test_no_lookahead_under_future_perturbation(prices: pd.DataFrame, varying_rf
     base = _outputs(run_strategy(prices, rf, params))
     rng = np.random.default_rng(99)
     for cut in CUTS:
-        future = slice(cut + 1, None)
-        noisy = prices.copy()
-        noisy.iloc[future] *= np.exp(rng.normal(0.0, 0.05, noisy.iloc[future].shape))
-        noisy_rf = rf.copy()
-        noisy_rf.iloc[future] *= np.exp(rng.normal(0.0, 0.2, len(rf) - cut - 1))
+        noisy, noisy_rf = _perturb_after(prices, rf, cut, rng)
         pert = _outputs(run_strategy(noisy, noisy_rf, params))
         assert pert.keys() == base.keys()
         for name, a in base.items():
@@ -93,6 +109,63 @@ def test_no_lookahead_under_future_perturbation(prices: pd.DataFrame, varying_rf
         for name in ("score", "total"):  # the perturbation did reach the later dates
             after_a, after_b = base[name].iloc[cut + 1 :].to_numpy(), pert[name].iloc[cut + 1 :].to_numpy()
             assert not np.array_equal(after_a, after_b, equal_nan=True)
+
+
+# The walk-forward's stitched series (§9.2), where "excess" is the stitched excess. Small grids:
+# the stitching and the switch timing are the same for any grid.
+WALK_FORWARD_CASES = [
+    pytest.param(
+        {"strategy": "pairs", "tickers": ("Y", "X"), "L": 60, "borrow_bps": 200.0},
+        {"L_values": (20, 60, 120), "z_entry_values": (1.5, 2.5)},
+        id="pairs-borrow-k1",
+    ),
+    pytest.param(
+        {
+            "strategy": "trend",
+            "tickers": ("X",),
+            "L": 63,
+            "signal_frequency": "daily",
+            "execution_lag": 2,
+            "vol_target": 0.10,
+            "vol_refresh": "daily",
+        },
+        {"L_values": (21, 63, 126)},
+        id="trend-daily-overlay-k2",
+    ),
+]
+
+
+@pytest.mark.parametrize("config, grid", WALK_FORWARD_CASES)
+def test_no_lookahead_in_the_walk_forward_stitched_series(
+    prices: pd.DataFrame, varying_rf, config: dict, grid: dict
+) -> None:
+    params = StrategyParams(**config)
+    rf = varying_rf(prices.index)
+    windows = {**grid, "train_days": 252, "test_days": 63}
+    base = run_walk_forward(prices, rf, params, **windows)
+    assert base.n_distinct_selected >= 2  # some fold switches configuration
+    starts = [prices.index.get_loc(fold.test_start) for fold in base.folds]
+    # The close before a switch, a switch close itself (b_j - 1), inside a fold, and in the last fold.
+    cuts = (starts[1] - 2, starts[2] - 1, starts[3] + 30, starts[-1] + 10)
+
+    def stitched(res: WalkForwardResult) -> dict[str, np.ndarray]:
+        return {
+            "weights": res.weights.to_numpy(),
+            "excess": res.daily.excess.to_numpy(),
+            "total": res.daily.total.to_numpy(),
+        }
+
+    rng = np.random.default_rng(99)
+    for cut in cuts:
+        noisy, noisy_rf = _perturb_after(prices, rf, cut, rng)
+        pert = run_walk_forward(noisy, noisy_rf, params, **windows)
+        a, b = stitched(base), stitched(pert)
+        for name in a:
+            assert np.array_equal(a[name][: cut + 1], b[name][: cut + 1]), (
+                f"{name} changed on or before {cut}"
+            )
+        after = slice(cut + 1, base.stop)  # the perturbation did reach the later stitched days
+        assert not np.array_equal(a["excess"][after], b["excess"][after])
 
 
 # ---------------------------------------------------------------- 2. hand-computed toy cases

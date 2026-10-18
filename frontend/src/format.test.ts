@@ -12,6 +12,7 @@ import {
   fmtMultiple,
   fmtNum,
   fmtPct,
+  fmtPerYear,
   fmtPValue,
   fmtRate,
   fmtSignedPct,
@@ -32,6 +33,7 @@ describe('null handling (§2.4: undefined means null; §13: null shows as a dash
     fmtMoney,
     fmtMs,
     fmtTurnover,
+    fmtPerYear,
   ]
 
   it.each([null, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
@@ -138,5 +140,14 @@ describe('fmtBps', () => {
     expect(fmtBps(7.5, 2)).toBe('7.50 bps')
     expect(fmtBps(null)).toBe('—')
     expect(fmtBps(Number.NaN)).toBe('—')
+  })
+})
+
+describe('fmtPerYear', () => {
+  it('shows an annual drag as a percent a year with two decimals', () => {
+    expect(fmtPerYear(0.00106)).toBe('0.11%/yr')
+    expect(fmtPerYear(0.0198)).toBe('1.98%/yr')
+    expect(fmtPerYear(0)).toBe('0.00%/yr')
+    expect(fmtPerYear(null)).toBe(DASH)
   })
 })

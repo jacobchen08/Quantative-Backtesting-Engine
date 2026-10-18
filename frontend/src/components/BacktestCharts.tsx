@@ -66,7 +66,7 @@ function oosMarks(rows: readonly SeriesRow[], firstOos: number, label: boolean) 
   ]
 }
 
-function ChartTitle(props: { children: ReactNode; legend?: ReactNode }) {
+export function ChartTitle(props: { children: ReactNode; legend?: ReactNode }) {
   return (
     <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 text-[11px] text-neutral-500">
       <span className="tracking-widest uppercase">{props.children}</span>
@@ -75,7 +75,7 @@ function ChartTitle(props: { children: ReactNode; legend?: ReactNode }) {
   )
 }
 
-function Key(props: { color: string; children: ReactNode; dashed?: boolean; glyph?: string }) {
+export function Key(props: { color: string; children: ReactNode; dashed?: boolean; glyph?: string }) {
   return (
     <span className="inline-flex items-center gap-1">
       {props.glyph ? (

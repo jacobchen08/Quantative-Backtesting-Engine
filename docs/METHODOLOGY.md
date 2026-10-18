@@ -22,7 +22,7 @@ A signal s_t may use data through the close of day t. The executed position is p
 - **k = 1 (default) fills at the next day's close.** The close that produced the signal is only known once the market has closed, so trading at that close needs an order sent before seeing the price. k = 0 is offered as the optimistic bound.
 - **The lag is applied once, in the backtester.** Strategies return unshifted signals. A second shift would silently add a day of lag; a missing one would be look-ahead.
 - **The last k signals are never executed,** because they would fill after the data ends.
-- **The perturbation test checks this** (§12). Multiplying every price after a date by random noise must leave every score, signal, weight, position and return up to that date bit-identical. It covers every strategy, both hedge modes, both trend frequencies, and the vol overlay off and on with each refresh schedule.
+- **The perturbation test checks this** (§12). Multiplying every price after a date by random noise must leave every score, signal, weight, position and return up to that date bit-identical. It covers every strategy, both hedge modes, both trend frequencies, the vol overlay off and on with each refresh schedule, the long-only switch, a borrow fee, and the walk-forward's stitched series (§26 below).
 
 ### 3. Data (§4)
 - **Only final bars are cached:** those dated before `today_ny()`. During market hours Yahoo serves a partial bar for today, and caching it would freeze an intraday price as a close.
@@ -336,6 +336,8 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **The cost sweep follows the KPI grid's IS / OOS / Full toggle,** so the break-even line and the KPI tile always describe the same days.
 - **The rolling charts share the equity chart's rows and `syncId`,** so hovering a date shows the equity, the drawdown and the trailing-year Sharpe and beta of that day together.
 - **Calendar months use the heatmap's diverging scale,** bounded by the largest |monthly return| but at least 2%, so a quiet strategy's months aren't all saturated. Partial periods are hatched.
+- **The walk-forward has its own button,** because it backtests the whole grid. Its result stays when the sidebar changes, marked as stale until the sidebar builds the same request again, so a slow run is never discarded silently.
+- **Alternate test folds are shaded** in the walk-forward chart, so each fold's boundaries are visible, and the tooltip names each day's fold. The fold table marks every change of choice.
 
 ### 22. Borrow fee and the long-only switch (§5.9, §6.1)
 - **What a short costs.** Shorting means borrowing the shares, and the lender charges an annual fee on their value. The engine charges b basis points a year on the short notional held into each day: borrow_t = (b / 10,000 / 252) · Σ_i max(−w_i,t−1, 0). It accrues daily on the same 252-day basis as rf. The sale proceeds still earn rf (§4 above), so the fee is the only extra cost.
@@ -407,6 +409,24 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - It also shrinks V, the spread of the trials' Sharpe ratios, which lowers the bar. As the cells approach perfect correlation, V shrinks towards 0 and the DSR approaches the plain PSR against 0, which passes 5% of the time with no skill. (At V < 1e-24 the DSR is `null`.)
   - Measured, the correlated grids pass more often than independent trials (1.5–3.0% against 0.5%) but stay below the nominal 5%. The DSR remains conservative here, though less so than the N-overstatement argument alone suggests.
 
+### 26. Walk-forward analysis (§9.2)
+- **Why.** The sensitivity grid (§17 above) chooses on in-sample data, and the OOS segment is then a fair test only once: a user who re-tunes after looking at it has used it for selection. Walk-forward makes the selection part of the protocol. In each fold the grid's best configuration is chosen on a training window and traded on the test window that follows. Stitched together, the test windows form a track record in which every day was traded with parameters chosen before it.
+- **Folds** start at s, the grid's common start (§17): from s on every configuration is trading, so all of them compete on the same training days.
+  - Rolling windows (the default) use the last T days, so the choice can follow a change of regime, but each estimate rests on T days only. Anchored windows grow from s: the estimates steady and the choice changes less often.
+  - The defaults are 756 training days (three years) and 63 test days (a quarter). A last test window under 21 days is dropped, because a Sharpe ratio over a few days means nothing. At least two folds are required.
+- **Selection is causal.** Fold j ranks the configurations by their own §8 Sharpe ratio on the training window, which ends at the close of b_j − 1, the day before the test window. A configuration is eligible if it was evaluating from the window's first day (always true from s on), was not ruined by its last day, and has a defined Sharpe ratio there (one that never held a position has none). Ties go to grid order. With nothing eligible the fold holds cash.
+  - Tested by changing prices after each fold's training window: the fold's choice never moves. The stitched series also passes the §12 look-ahead test, like any backtest.
+- **Stitching by executed weights.** From the close of b_j − 1 to the close before the next test window, the walk-forward holds exactly the weights the chosen configuration holds at each close, which already include its execution lag k. A position that configuration opened before the fold is inherited, as it would be by a trader switching to it.
+  - §6.1 then applies to the stitched weights: returns, the borrow fee, turnover and costs. A switch is an ordinary trade at the close of b_j − 1, from the position held into that close to the new configuration's weights. The walk-forward enters from flat at the close of b₀ − 1, its first evaluated day.
+  - Each day belongs to one fold: fold j owns its test days, and fold 0 also its entry day. The cost of a switch falls on the last day of the fold being left, the way a trade's exit cost belongs to that trade (§15 above). A fold's test Sharpe is therefore what the walk-forward actually earned on its days, after switching costs, and the folds' excess returns add up to the total (tested to 1e-12).
+  - With a one-configuration grid, the stitched series is that configuration's own, apart from the entry from flat on the first day (tested).
+- **Outputs.** The §8 metrics of the stitched series. Its positions span configurations, so it has no trades, and the four trade fields (closed and open trades, win rate, holding days) are `null`. Turnover and the cost and borrow drags are reported, because the walk-forward pays them. A day counts as invested when a position was held into it. The comparisons are the request's own configuration held fixed over the same days, and the benchmark.
+- **What it shows** *(engine)*. Each figure is from `/api/walk-forward` with every walk-forward default:
+  - KO/PEP pairs, `{"strategy": "pairs", "tickers": ["KO", "PEP"], "start": "2015-01-02", "end": "2025-12-31"}`: 30 folds from 2018-06-25. The walk-forward chose 10 of the 20 configurations and changed its choice 14 times. The configurations it chose had an average training Sharpe ratio of 0.29 and an average test Sharpe ratio of −1.03 (over the 19 folds that held a position). The stitched Sharpe ratio was −0.97 (95% CI −1.69 to −0.26), against −0.43 for L 60 / z 2.0 held fixed and 0.66 for SPY. Re-choosing followed noise: the best Sharpe ratio of the last three years did not predict the next quarter.
+  - The same with `"anchored": true`: 7 changes and 3 distinct configurations, and a stitched Sharpe ratio of −0.90.
+  - SPY trend with a 10% vol target, `{"strategy": "trend", "tickers": ["SPY"], "start": "2006-01-03", "end": "2025-12-31", "vol_target": 0.1}`: 62 folds from 2010-08-02, with every one of the 5 lookbacks chosen at some point. The stitched Sharpe ratio was 0.23, against 0.49 for L 252 held fixed and 0.80 for buy-and-hold.
+- **Why it remedies OOS reuse, and what it can't fix.** Each choice is computed before its test window, so re-running the walk-forward on new data can't leak a test window into its own selection. The grid, the window lengths and the strategy are still chosen by the user, though. Choosing them after seeing a walk-forward result makes it in-sample again (Limitations).
+
 ## Limitations
 - **Selection and survivorship bias.** The preset pairs and ETFs were chosen with hindsight: they exist today and are known to be related. A pair that stopped moving together, or a stock that was delisted, never enters the sample, which flatters every pairs result.
 - **Execution.**
@@ -425,6 +445,9 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - It treats the grid's correlated cells as independent, an approximation whose net effect was conservative in the calibration above (§25).
 - **Rolling statistics overlap.** Consecutive one-year windows share all but one day, so the rolling series looks smoother and more persistent than the evidence behind it.
 - **Tuning while watching OOS results turns OOS into IS.** The engine keeps OOS out of its own selection. But a person who changes parameters until the OOS panel looks good has used OOS for selection. The honest OOS result is the one recorded before looking.
+  - The walk-forward (§26) removes this for the choice it makes itself. Choosing the grid, the window lengths or the strategy after seeing a walk-forward result reintroduces it.
+- **Walk-forward selection chases noisy training Sharpe ratios.** Over three years an annualized Sharpe ratio has a standard error of about 0.6 (√(252/756), §13 above), so the best of 20 is largely the luckiest. Many distinct choices mean unstable parameters, not adaptivity: on KO/PEP the walk-forward chose 10 of 20 configurations, and their test Sharpe ratios averaged −1.03 against 0.29 in training (§26). The ranking also ignores the cost of switching, which the stitched series then pays.
+- **A walk-forward switch trades at the close that completes its training window.** Fold j's choice uses returns through the close of b_j − 1 and trades at that same close, as an execution lag of 0 would (§2 above). Ranking the configurations needs that close, so in practice the switch would fill a day later. Each configuration's own signals keep their lag k; only the switch, at most once per fold, is optimistic.
 - **The Sharpe CI assumes iid returns** (Lo 2002). Autocorrelation, volatility clustering and fat tails make the true interval wider, especially for strategies that hold positions for weeks.
 - **Trend following here trades one asset at a time.** The published results come from diversified portfolios of dozens of futures. A single asset's trend Sharpe ratio is much lower and noisier: 0.32 on SPY (§10 above). Phase 7 adds a multi-asset portfolio.
 - **The vol forecast lags.** The EWMA reacts to a volatility spike only after it starts, so realized vol overshoots the target in crashes: the weekly overlay's yearly range above still reaches 14.0% against a 10% target.
@@ -587,3 +610,27 @@ As Phase 0, item 3 planned, `npm test` is now plain `vitest run`.
 5. **The cost sweep's axis stretches to a break-even up to 4× the grid's top cost (§13, view 8, addition).** A break-even further out is stated in words instead, so the 0–100 bps sweep isn't squashed into one corner.
 6. **The benchmark toggle also hides the calendar's buy-and-hold column.** This extends "After Phase 4", item 1.
 7. **Page order (§13).** The new views sit next to the views they relate to: rolling statistics and calendar returns after equity and drawdown, and the cost sweep before the sensitivity grid.
+
+### Phase 6 (approved 2026-10-17)
+1. **`fixed_metrics` can be `null` (§11.3).** It is `null` when the request's own configuration was ruined before the walk-forward's first day, by the same rule as §6.2 for a segment that starts after ruin; `fixed_equity` is then all `null`. Tested. CLAUDE.md §11.3 now says so.
+2. **The switching cost follows §6.1 (§9.2 wording).** §9.2 said a switch is charged |w^(j)_{b−1} − w^(j−1)_{b−1}|. Applying §6.1 to the stitched weights, which §9.2 also requires, charges |w^(j)_{b−1} − w^(j−1)_{b−2}|: the trade from the position actually held into that close. The two differ only when the outgoing configuration itself trades at that close. CLAUDE.md §9.2 now gives the §6.1 form.
+3. **The last fold runs through the last close (§9.2).** The span [b_j − 1, b_{j+1} − 1) has no b_{J+1} for the last fold; it runs to the end of the stitched window. The one-configuration identity test (§12) requires this. CLAUDE.md §9.2 now says so.
+4. **Invested days of the stitched series.** It has no trade ids, so a day counts as invested when a position was held into it (gross exposure > 0). This drives `pct_days_in_market`, the Sharpe's no-exposure rule and the folds' test Sharpe ratios. For a single configuration it is the same as `held_id` not null.
+5. **Only the four trade fields are `null` for the stitched series (§9.2).** Closed and open trades, win rate and holding days are `null`; turnover, cost drag and borrow drag are reported, because the walk-forward pays them.
+6. **The fixed run's trades.** `fixed_metrics` counts the trades entered in the window. A trade still held after the window's last day counts as open; this matters only when the walk-forward is ruined before the end. Tested.
+7. **Walk-forward warnings (§8).**
+   - The response also carries the data-cleaning warnings (§4.4) and the stitched series' ruin warning (§6.2).
+   - Fold numbers in the warnings are the 0-based indexes of the fold table and `series.fold`.
+   - "Changed in more than half the folds" counts the folds whose choice differs from the previous fold's, a flat fold counting as a choice, and warns when that count exceeds half the folds.
+   - Folds that start after a stitched ruin stay in the fold table, with a `null` test Sharpe.
+8. **Dashboard (§13, view 11).**
+   - The walk-forward settings are checked only by Run walk-forward, which sends them, so a blank one never blocks Run.
+   - A result survives later Runs and is marked "Settings changed since this ran" when the sidebar would build a different request.
+   - The buy & hold toggle also hides the walk-forward chart's benchmark line and its metrics column, extending "After Phase 4", item 1. The README screenshot shows that view, so the axis fits the two strategies.
+   - Additions: a summary row (out-of-sample days, folds and changes of choice, distinct configurations, both Sharpe ratios), ↻ marks on changed choices, test Sharpe ratios coloured by sign, each day's fold in the tooltip, and the trade rows in the metrics table ("—" for the walk-forward).
+   - The panel sits after the sensitivity grid, whose grid it reruns, and before Monte Carlo.
+9. **Tests and bench beyond §12 and §14.**
+   - Tests of the selection rules on crafted inputs (ties, the ruin-day boundary, exposure), two ruin scenarios, the outputs on a window shorter than the calendar, and the warnings.
+   - The perturbation test's walk-forward cases check the stitched weights and total return as well as the excess.
+   - The bench also times `run_walk_forward` alone and reports the folds and distinct choices.
+   - Planted bugs: 18 of 18 in the backend caught by tests; 12 of 13 in the frontend helpers, the 13th caught by the TypeScript check in `npm run build`.

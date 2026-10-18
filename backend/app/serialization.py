@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from app.services.monte_carlo import ModelResult, MonteCarloResult
-from app.services.pipeline import BacktestReport, SensitivityResult
+from app.services.pipeline import BacktestReport, SensitivityResult, WalkForwardResult
 
 
 def to_jsonable(obj: Any) -> Any:
@@ -121,7 +121,6 @@ def backtest_payload(
 
 def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
     """SensitivityResponse (§11.3). window.end is the split date, which the window excludes."""
-    selected = None if result.selected is None else {"L": result.selected[0], "z_entry": result.selected[1]}
     return to_jsonable(
         {
             "L_values": result.L_values,
@@ -129,8 +128,55 @@ def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
             "sharpe": result.sharpe,
             "n_configs_tested": result.n_configs_tested,
             "window": {"start": result.window_start, "end": result.window_end},
-            "selected": selected,
+            "selected": _cell(result.selected),
             "deflated": result.deflated,
+        }
+    )
+
+
+def _cell(cell: tuple[int, float | None] | None) -> dict[str, Any] | None:
+    return None if cell is None else {"L": cell[0], "z_entry": cell[1]}
+
+
+def walk_forward_payload(
+    result: WalkForwardResult, resolved: dict[str, Any], data_warnings: list[str]
+) -> dict[str, Any]:
+    """WalkForwardResponse (§11.3). The stitched daily components stay server-side."""
+    s = result.series
+    return to_jsonable(
+        {
+            "resolved": {
+                **resolved,
+                "L_values": result.L_values,
+                "z_entry_values": result.z_entry_values,
+            },
+            "folds": [
+                {
+                    "train_start": f.train_start,
+                    "train_end": f.train_end,
+                    "test_start": f.test_start,
+                    "test_end": f.test_end,
+                    "selected": _cell(f.selected),
+                    "train_sharpe": f.train_sharpe,
+                    "test_sharpe": f.test_sharpe,
+                }
+                for f in result.folds
+            ],
+            "n_configs": result.n_configs,
+            "n_distinct_selected": result.n_distinct_selected,
+            "series": {
+                "dates": s.index,
+                "equity": s["equity"],
+                "fixed_equity": s["fixed_equity"],
+                "benchmark_equity": s["benchmark_equity"],
+                "fold": [None if np.isnan(j) else int(j) for j in s["fold"].to_numpy()],
+            },
+            "metrics": result.metrics,
+            "fixed_metrics": result.fixed_metrics,
+            "benchmark_metrics": result.benchmark_metrics,
+            "ruined": result.ruined,
+            "ruin_date": result.ruin_date,
+            "warnings": [*data_warnings, *result.warnings],
         }
     )
 

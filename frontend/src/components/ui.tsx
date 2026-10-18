@@ -102,6 +102,17 @@ export function ErrorBox(props: { title: string; detail: string; httpStatus?: nu
   )
 }
 
+/** A labelled figure with a line of context under it. */
+export function Stat(props: { label: string; value: string; sub: string; title?: string }) {
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2" title={props.title}>
+      <p className="text-[11px] text-neutral-500">{props.label}</p>
+      <p className="text-lg leading-tight text-neutral-100 tabular-nums">{props.value}</p>
+      <p className="text-[11px] text-neutral-500 tabular-nums">{props.sub}</p>
+    </div>
+  )
+}
+
 export function Muted(props: { children: ReactNode }) {
   return <p className="text-sm text-neutral-500">{props.children}</p>
 }

@@ -737,8 +737,8 @@ The sensitivity grid picks parameters on in-sample data, but the user then reads
    - Eligible configurations started evaluating by the training window's first day, were not ruined on or before its last day, and have a non-null §8 Sharpe on it.
    - Pick the highest training Sharpe, with ties going to grid order.
    - If none is eligible, the fold is flat (zero weights) and gets a warning.
-4. **Stitching.** The chosen configuration controls the executed weights from the close **before** its test window through the close before the next test window: w*_t = w^(j)_t for t ∈ [b_j − 1, b_{j+1} − 1), where b_j is the test window's first day. Then apply §6.1's formulas (from `gross_excess` on, with c and the borrow fee) and §6.2's ruin rule to w*.
-   - Switching configurations is therefore an ordinary trade at that close, charged as turnover |w^(j)_{b−1} − w^(j−1)_{b−1}|.
+4. **Stitching.** The chosen configuration controls the executed weights from the close **before** its test window through the close before the next test window: w*_t = w^(j)_t for t ∈ [b_j − 1, b_{j+1} − 1), where b_j is the test window's first day. The last fold rules through the last close of the stitched window. Then apply §6.1's formulas (from `gross_excess` on, with c and the borrow fee) and §6.2's ruin rule to w*.
+   - Switching configurations is therefore an ordinary trade at that close, from the position held into it: §6.1 charges turnover |w^(j)_{b−1} − w^(j−1)_{b−2}|.
    - The first fold's entry cost falls on day b₀ − 1, which is the walk-forward's first evaluated day. Its baseline is b₀ − 2.
    - **Which fold owns which day.** Fold j owns the stitched days [b_j, b_{j+1}), and fold 0 also owns day b₀ − 1, its entry day. The switch into fold j + 1 trades at the close of b_{j+1} − 1, so its cost falls on fold j's last day. That is the cost of leaving fold j's configuration, the same way a trade's exit cost belongs to that trade (§7.1). `series.fold` is 0 on day b₀ − 1, j on fold j's days, and `null` before.
    - **`test_sharpe`** is the §8 Sharpe of the **stitched** excess over the days fold j owns. It is not the chosen configuration's own excess, so it includes the costs the stitched portfolio actually paid. The folds' days partition the stitched window, so the folds' summed excess equals the total.
@@ -1014,7 +1014,8 @@ type WalkForwardResponse = {                                    // Phase 6, §9.
   n_configs: number; n_distinct_selected: number;
   series: { dates: string[]; equity: (number | null)[]; fixed_equity: (number | null)[];
             benchmark_equity: (number | null)[]; fold: (number | null)[] };   // fold index of each test day
-  metrics: Metrics; fixed_metrics: Metrics; benchmark_metrics: Metrics;   // stitched metrics have null trade fields
+  metrics: Metrics; fixed_metrics: Metrics | null; benchmark_metrics: Metrics;   // stitched metrics have null trade fields;
+                                                                                 // fixed_metrics null if that run was ruined before the window
   ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 type ModelResult = {

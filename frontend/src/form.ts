@@ -10,6 +10,7 @@ import type {
   SignalFrequency,
   Strategy,
   VolRefresh,
+  WalkForwardRequest,
 } from './types'
 
 export const STRATEGIES: readonly { value: Strategy; label: string }[] = [
@@ -70,6 +71,9 @@ export type FormState = {
   mcBlockLen: string // trading days
   mcSeed: string // '' = the API draws a seed and returns it
   mcZeroDrift: boolean
+  wfTrainDays: string // walk-forward training window, trading days
+  wfTestDays: string // walk-forward test window, trading days
+  wfAnchored: boolean // false: rolling training windows
 }
 
 export function defaultForm(today: string): FormState {
@@ -102,6 +106,9 @@ export function defaultForm(today: string): FormState {
     mcBlockLen: '10',
     mcSeed: '',
     mcZeroDrift: false,
+    wfTrainDays: '756',
+    wfTestDays: '63',
+    wfAnchored: false,
   }
 }
 
@@ -158,7 +165,10 @@ export type BuiltRequests = {
 
 export type BuildResult = ({ ok: true } & BuiltRequests) | { ok: false; error: string }
 
-/** The three requests a Run sends. Only fields that apply to the chosen strategy are included. */
+/**
+ * The three requests a Run sends. Only fields that apply to the chosen strategy are included. The
+ * walk-forward settings are not checked here, because Run doesn't send them (buildWalkForward does).
+ */
 export function buildRequests(form: FormState): BuildResult {
   try {
     const backtest = buildBacktest(form)
@@ -173,6 +183,28 @@ export function buildRequests(form: FormState): BuildResult {
       ...(mcSeed === null ? {} : { seed: mcSeed }),
     }
     return { ok: true, backtest, sensitivity: { ...backtest }, monteCarlo }
+  } catch (error) {
+    if (error instanceof FormError) return { ok: false, error: error.message }
+    throw error
+  }
+}
+
+export type WalkForwardBuild = { ok: true; request: WalkForwardRequest } | { ok: false; error: string }
+
+/**
+ * The request "Run walk-forward" sends (§13): the backtest's fields, the default grid (§9) and the
+ * fold windows. The walk-forward reruns the whole grid, so it has its own button instead of going
+ * out with every Run.
+ */
+export function buildWalkForward(form: FormState): WalkForwardBuild {
+  try {
+    const request: WalkForwardRequest = {
+      ...buildBacktest(form),
+      train_days: num('Training days', form.wfTrainDays),
+      test_days: num('Test days', form.wfTestDays),
+      anchored: form.wfAnchored,
+    }
+    return { ok: true, request }
   } catch (error) {
     if (error instanceof FormError) return { ok: false, error: error.message }
     throw error

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { API_BASE, ApiError, errorDetail, postBacktest, postMonteCarlo, postSensitivity } from './api'
+import { API_BASE, ApiError, errorDetail, postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
 import type { BacktestRequest } from './types'
 
 const REQUEST: BacktestRequest = { strategy: 'pairs', tickers: ['KO', 'PEP'], start: '2015-01-02', end: '2025-12-31' }
@@ -58,6 +58,10 @@ describe('typed fetch wrappers', () => {
     const monteCarlo = stubFetch(json({}))
     await postMonteCarlo({ source: 'strategy', backtest: REQUEST })
     expect(monteCarlo.mock.calls[0][0]).toBe(`${API_BASE}/api/monte-carlo`)
+    const walkForward = stubFetch(json({}))
+    await postWalkForward({ ...REQUEST, train_days: 504 })
+    expect(walkForward.mock.calls[0][0]).toBe(`${API_BASE}/api/walk-forward`)
+    expect(JSON.parse(walkForward.mock.calls[0][1]?.body as string)).toEqual({ ...REQUEST, train_days: 504 })
   })
 
   it('turns an error response into an ApiError carrying the status and detail', async () => {

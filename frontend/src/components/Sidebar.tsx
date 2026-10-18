@@ -109,7 +109,7 @@ export function Sidebar(props: {
     >
       <div className="border-b border-neutral-800 px-4 py-3">
         <h1 className="text-sm font-semibold tracking-widest text-emerald-400 uppercase">Quant Engine</h1>
-        <p className="text-[11px] text-neutral-500">Backtests · sensitivity · Monte Carlo</p>
+        <p className="text-[11px] text-neutral-500">Backtests · sensitivity · walk-forward · Monte&nbsp;Carlo</p>
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3">
@@ -354,6 +354,36 @@ export function Sidebar(props: {
           ) : (
             <p className="text-[11px] text-neutral-500">Off: unit gross exposure while invested.</p>
           )}
+        </Section>
+
+        <Section title="Walk-forward">
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Training (days)">
+              <NumberInput value={form.wfTrainDays} onChange={set('wfTrainDays')} min={252} max={2520} step={21} />
+            </Field>
+            <Field label="Test (days)">
+              <NumberInput value={form.wfTestDays} onChange={set('wfTestDays')} min={21} max={252} step={21} />
+            </Field>
+          </div>
+          <Field label="Training windows">
+            <Segmented
+              label="Walk-forward training windows"
+              value={form.wfAnchored ? 'anchored' : 'rolling'}
+              options={[
+                { value: 'rolling', label: 'Rolling', title: 'Each fold trains on the last T trading days' },
+                {
+                  value: 'anchored',
+                  label: 'Anchored',
+                  title: 'Each fold trains on everything from the grid’s first common day',
+                },
+              ]}
+              onChange={(v) => set('wfAnchored')(v === 'anchored')}
+            />
+          </Field>
+          <p className="text-[11px] leading-snug text-neutral-500">
+            Sent by <span className="text-neutral-400">Run walk-forward</span> in its panel, not by Run: it reruns the
+            whole parameter grid.
+          </p>
         </Section>
 
         <Section title="Monte Carlo">

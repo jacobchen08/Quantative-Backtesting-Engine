@@ -1,8 +1,10 @@
-"""run_strategy() (§5.0), the backtest report, run_sensitivity() (§9) and Monte Carlo inputs.
+"""run_strategy() (§5.0), the backtest report, run_sensitivity() (§9), run_walk_forward() (§9.2)
+and Monte Carlo inputs.
 
 Pure (§0, rule 8). Prices and the risk-free rate come in as pandas objects on the run
 calendar; results go out as dataclasses. run_strategy is the single place that runs the
-§5.0 steps; everything else (the API, the sensitivity grid, the tests) goes through it.
+§5.0 steps; everything else (the API, the sensitivity grid, the walk-forward, the tests) goes
+through it.
 """
 
 from __future__ import annotations
@@ -453,6 +455,8 @@ def _series(run: StrategyRun, bench: pd.Series, market_excess: pd.Series) -> pd.
 
 # ---------------------------------------------------------------- sensitivity (§9)
 
+Cell = tuple[int, float | None]  # a grid configuration (L, z_entry); z_entry is None for trend
+
 
 @dataclass(frozen=True)
 class BestCell:
@@ -519,40 +523,10 @@ def run_sensitivity(
             score; the message names the culprit L.
     """
     trend = params.strategy == "trend"
-    Ls = tuple(L_values) if L_values is not None else DEFAULT_L_GRID[params.strategy]
-    zs = None if trend else tuple(z_entry_values) if z_entry_values is not None else DEFAULT_Z_ENTRY_GRID
-    if not 1 <= len(Ls) <= MAX_GRID_VALUES or (zs is not None and not 1 <= len(zs) <= MAX_GRID_VALUES):
-        raise ValueError(f"each grid axis needs 1 to {MAX_GRID_VALUES} values")
-    if zs is not None and not all(z > params.z_exit for z in zs):
-        raise ValueError(f"every z_entry must be greater than z_exit = {params.z_exit}")
-
+    Ls, zs = grid_axes(params, L_values, z_entry_values)
     split = run_strategy(prices, rf, params).split_date  # 1. exactly as /api/backtest resolves it
-
-    runs: dict[tuple[int, float | None], StrategyRun] = {}
-    for L in Ls:
-        for z in zs if zs is not None else (None,):
-            cfg = (
-                replace(params, L=L, split_date=split)
-                if z is None
-                else replace(params, L=L, z_entry=z, split_date=split)
-            )
-            try:
-                runs[(L, z)] = run_strategy(prices, rf, cfg)  # 2. its own t0, the common split
-            except NoValidScoreError as exc:
-                raise NoValidScoreError(
-                    f"Sensitivity grid: L = {L} gives no valid score on this date range. "
-                    f"Use a longer date range or drop L = {L} from the grid."
-                ) from exc
-            except InsufficientDataError as exc:
-                if exc.n_is is not None and exc.n_is < MIN_IS_DAYS:
-                    message = (
-                        f"Sensitivity grid: L = {L} leaves only {exc.n_is} in-sample days in the common "
-                        f"window ({MIN_IS_DAYS} needed). Use a longer date range or drop L = {L} "
-                        "from the grid."
-                    )
-                else:
-                    message = f"Sensitivity grid: L = {L}: {exc}"
-                raise InsufficientDataError(message, n_is=exc.n_is, n_oos=exc.n_oos) from exc
+    # 2. Every configuration with its own t0 and the common split.
+    runs = run_grid(prices, rf, params, Ls, zs, split, label="Sensitivity grid", where="in the common window")
 
     # 3. The common window starts at the latest first-evaluated day across the grid.
     calendar = prices.index
@@ -579,7 +553,72 @@ def run_sensitivity(
     )
 
 
-Cell = tuple[int, float | None]  # (L, z_entry); z_entry is None for trend
+def grid_axes(
+    params: StrategyParams, L_values: tuple[int, ...] | None, z_entry_values: tuple[float, ...] | None
+) -> tuple[tuple[int, ...], tuple[float, ...] | None]:
+    """The §9 grid axes: the defaults for the strategy, or the request's overrides.
+
+    Trend has no z_entry axis, so its z_entry_values are ignored and None is returned for them.
+
+    Raises:
+        ValueError: an axis has no values or more than 8, or a z_entry is not above z_exit.
+    """
+    trend = params.strategy == "trend"
+    Ls = tuple(L_values) if L_values is not None else DEFAULT_L_GRID[params.strategy]
+    zs = None if trend else tuple(z_entry_values) if z_entry_values is not None else DEFAULT_Z_ENTRY_GRID
+    if not 1 <= len(Ls) <= MAX_GRID_VALUES or (zs is not None and not 1 <= len(zs) <= MAX_GRID_VALUES):
+        raise ValueError(f"each grid axis needs 1 to {MAX_GRID_VALUES} values")
+    if zs is not None and not all(z > params.z_exit for z in zs):
+        raise ValueError(f"every z_entry must be greater than z_exit = {params.z_exit}")
+    return Ls, zs
+
+
+def run_grid(
+    prices: pd.DataFrame,
+    rf: pd.Series,
+    params: StrategyParams,
+    Ls: tuple[int, ...],
+    zs: tuple[float, ...] | None,
+    split: pd.Timestamp,
+    *,
+    label: str,
+    where: str,
+) -> dict[Cell, StrategyRun]:
+    """Every grid configuration through run_strategy, each with its own t0 and the common split
+    (§9, step 2). Keyed by (L, z_entry), in grid order: rows by L, then z_entry.
+
+    Raises:
+        NoValidScoreError, InsufficientDataError: a configuration has too little data. The
+            message starts with label and names the culprit L; `where` says which in-sample
+            days ran short.
+    """
+    runs: dict[Cell, StrategyRun] = {}
+    for L in Ls:
+        for z in zs if zs is not None else (None,):
+            cfg = (
+                replace(params, L=L, split_date=split)
+                if z is None
+                else replace(params, L=L, z_entry=z, split_date=split)
+            )
+            try:
+                runs[(L, z)] = run_strategy(prices, rf, cfg)
+            except NoValidScoreError as exc:
+                raise NoValidScoreError(
+                    f"{label}: L = {L} gives no valid score on this date range. "
+                    f"Use a longer date range or drop L = {L} from the grid."
+                ) from exc
+            except InsufficientDataError as exc:
+                if exc.n_is is not None and exc.n_is < MIN_IS_DAYS:
+                    message = (
+                        f"{label}: L = {L} leaves only {exc.n_is} in-sample days {where} "
+                        f"({MIN_IS_DAYS} needed). Use a longer date range or drop L = {L} from the grid."
+                    )
+                else:
+                    message = f"{label}: L = {L}: {exc}"
+                raise InsufficientDataError(message, n_is=exc.n_is, n_oos=exc.n_oos) from exc
+    return runs
+
+
 WindowExcess = tuple[np.ndarray, bool] | None  # (daily excess, held any position); None = no days
 
 
@@ -630,6 +669,314 @@ def deflated_sharpe(window: dict[Cell, WindowExcess], selected: Cell | None) -> 
         selected_dsr=None if selected is None else dsr(selected),
         best=best,
     )
+
+
+# ---------------------------------------------------------------- walk-forward (§9.2)
+
+TRAIN_DAYS_RANGE = (252, 2_520)
+TEST_DAYS_RANGE = (21, 252)
+MIN_TEST_DAYS = 21  # a shorter final test window is dropped
+MIN_FOLDS = 2
+
+
+@dataclass(frozen=True)
+class FoldWindow:
+    """Calendar positions of one fold: training [train_start, test_start), test [test_start, test_end)."""
+
+    train_start: int
+    test_start: int  # b_j, the first test day
+    test_end: int  # one past the last test day
+
+
+def walk_forward_folds(
+    n: int, start: int, train_days: int, test_days: int, anchored: bool
+) -> list[FoldWindow]:
+    """The §9.2 folds on a run calendar of n days, from the grid's common start s = start.
+
+    With T = train_days and S = test_days, fold j = 0, 1, ... tests [s + T + jS, s + T + (j+1)S),
+    cut at the end of the calendar, and trains on [s + jS, s + T + jS) when rolling or on
+    [s, s + T + jS) when anchored. A final test window shorter than 21 days is dropped.
+    """
+    folds: list[FoldWindow] = []
+    b = start + train_days
+    while b < n and min(b + test_days, n) - b >= MIN_TEST_DAYS:
+        train_start = start if anchored else start + len(folds) * test_days
+        folds.append(FoldWindow(train_start=train_start, test_start=b, test_end=min(b + test_days, n)))
+        b += test_days
+    return folds
+
+
+@dataclass(frozen=True)
+class Fold:
+    """One walk-forward fold (§9.2). Dates are inclusive; selected is None for a flat fold."""
+
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    test_start: pd.Timestamp
+    test_end: pd.Timestamp
+    selected: Cell | None
+    train_sharpe: float | None  # the chosen configuration's §8 Sharpe on the training window
+    test_sharpe: float | None  # §8 Sharpe of the stitched excess on the days this fold owns
+
+
+@dataclass(frozen=True)
+class WalkForwardResult:
+    """Walk-forward re-optimization over the §9 grid (§9.2).
+
+    folds: in order. Fold j owns its test days; fold 0 also owns day e, its entry day.
+    series: one row per date from the baseline e - 1 to the last stitched day, with columns
+        equity (stitched), fixed_equity (the request's own configuration, NaN after its ruin),
+        benchmark_equity and fold (the fold owning the day; NaN on the baseline).
+    metrics: §8 metrics of the stitched series on [e, stop), with the trade fields None.
+    fixed_metrics: the request's own configuration on the same days, None if it was ruined
+        before them; benchmark_metrics: buy-and-hold on the same days (§6.4).
+    weights, daily: the stitched executed weights w* and their §6.1 components (ruin day
+        clipped) on the whole calendar. Only positions [e, stop) form the walk-forward.
+    e: the first evaluated day, b0 - 1. stop: one past the last one (the ruin day, if any).
+    """
+
+    L_values: tuple[int, ...]
+    z_entry_values: tuple[float, ...] | None
+    n_configs: int
+    folds: list[Fold]
+    n_distinct_selected: int
+    series: pd.DataFrame
+    metrics: Metrics
+    fixed_metrics: Metrics | None
+    benchmark_metrics: Metrics
+    ruined: bool
+    ruin_date: pd.Timestamp | None
+    warnings: list[str]
+    weights: pd.DataFrame
+    daily: backtester.DailyReturns
+    e: int
+    stop: int
+
+
+def run_walk_forward(
+    prices: pd.DataFrame,
+    rf: pd.Series,
+    params: StrategyParams,
+    *,
+    L_values: tuple[int, ...] | None = None,
+    z_entry_values: tuple[float, ...] | None = None,
+    train_days: int = 756,
+    test_days: int = 63,
+    anchored: bool = False,
+) -> WalkForwardResult:
+    """Walk-forward analysis over the §9 parameter grid (§9.2).
+
+    1. Run the grid: every configuration through run_strategy with its own t0 and the request's
+       resolved split. The split only satisfies run_strategy; nothing here uses it.
+    2. Folds from s, the latest first-evaluated day across the grid (walk_forward_folds).
+    3. At the start of each fold, choose the eligible configuration with the highest §8 Sharpe on
+       the training window, using returns through its last close only. Eligible: evaluating by
+       the window's first day, not ruined on or before its last, and a defined Sharpe on it;
+       ties go to grid order. With none eligible the fold is flat.
+    4. Stitch: the chosen configuration's executed weights rule from the close before its test
+       window, b_j - 1, through the close before the next one; the last fold's run to its end.
+       §6.1 and §6.2's ruin rule then apply to the stitched weights w*, so a switch is an
+       ordinary trade, charged on the last day of the fold being left.
+
+    The weights at a close depend only on prices through that close, so the stitched series is
+    causal. The request's own configuration is measured on the same days for comparison.
+
+    Raises:
+        ValueError: train_days, test_days or the grid out of range.
+        InsufficientDataError: fewer than 2 folds, or a configuration has too little data (the
+            message names it).
+    """
+    for name, value, (lo, hi) in (
+        ("train_days", train_days, TRAIN_DAYS_RANGE),
+        ("test_days", test_days, TEST_DAYS_RANGE),
+    ):
+        if not lo <= value <= hi:
+            raise ValueError(f"{name} must be in {lo}..{hi}, got {value}")
+    Ls, zs = grid_axes(params, L_values, z_entry_values)
+    own = run_strategy(prices, rf, params)  # the split, and the fixed-parameter comparison
+    runs = run_grid(
+        prices, rf, params, Ls, zs, own.split_date, label="Walk-forward grid", where="before the split"
+    )
+
+    # 2. Folds.
+    calendar = prices.index
+    n = len(calendar)
+    s = max(run.backtest.e for run in runs.values())
+    windows = walk_forward_folds(n, s, train_days, test_days, anchored)
+    if len(windows) < MIN_FOLDS:
+        raise InsufficientDataError(
+            f"Walk-forward: the {n - s} trading days from the grid's first common evaluated day "
+            f"({calendar[s]:%Y-%m-%d}) to the end make {len(windows)} fold(s) of {train_days} training "
+            f"and {test_days} test days (a last test window under {MIN_TEST_DAYS} days is dropped); "
+            f"at least {MIN_FOLDS} are needed. Use a longer date range, or shorter windows."
+        )
+
+    # 3. Selection, causal: fold j looks at returns through the close of b_j - 1 only.
+    excess = {cell: run.backtest.excess.to_numpy() for cell, run in runs.items()}
+    held = {cell: run.backtest.held_id.notna().to_numpy() for cell, run in runs.items()}
+    chosen = [select_configuration(runs, excess, held, fw.train_start, fw.test_start) for fw in windows]
+
+    # 4. Stitching: fold j rules the executed weights at the closes [b_j - 1, b_{j+1} - 1).
+    legs = list(params.tickers)
+    w_star = np.zeros((n, len(legs)))
+    for j, (fw, (cell, _)) in enumerate(zip(windows, chosen, strict=True)):
+        first = fw.test_start - 1
+        last = windows[j + 1].test_start - 1 if j + 1 < len(windows) else fw.test_end
+        if cell is not None:
+            w_star[first:last] = runs[cell].backtest.w.to_numpy()[first:last]
+    weights = pd.DataFrame(w_star, index=calendar, columns=legs)
+    d = backtester.daily_returns(
+        w=weights, R=own.returns[legs], rf=rf, cost_bps=params.cost_bps, borrow_bps=params.borrow_bps
+    )
+    e = windows[0].test_start - 1  # the first fold's entry day: the first evaluated day
+    r = backtester.first_ruin_day(d.total, e, windows[-1].test_end)
+    stop = windows[-1].test_end if r is None else r + 1
+    if r is not None:
+        backtester.clip_ruin_day(d.excess, d.total, rf, r)
+
+    # Fold j owns its test days, and fold 0 also day e: together they partition [e, stop).
+    stitched_excess = d.excess.to_numpy()
+    stitched_held = (d.gross_held > 0).to_numpy()  # a position earns the day's P&L
+    owner = np.full(n, np.nan)
+    owner[e] = 0
+    folds = []
+    for j, (fw, (cell, train_sharpe)) in enumerate(zip(windows, chosen, strict=True)):
+        owner[fw.test_start : fw.test_end] = j
+        lo, hi = (e if j == 0 else fw.test_start), min(fw.test_end, stop)  # empty after a ruin
+        days, exposed = stitched_excess[lo:hi], bool(stitched_held[lo:hi].any())
+        test_sharpe = metrics.sharpe(days, exposed=exposed) if hi > lo else None
+        folds.append(
+            Fold(
+                train_start=calendar[fw.train_start],
+                train_end=calendar[fw.test_start - 1],
+                test_start=calendar[fw.test_start],
+                test_end=calendar[fw.test_end - 1],
+                selected=cell,
+                train_sharpe=train_sharpe,
+                test_sharpe=test_sharpe,
+            )
+        )
+
+    # 5. Outputs: the stitched series, the request's own configuration and the benchmark, on [e, stop).
+    win = slice(e, stop)
+    market_excess = own.returns[MARKET] - rf
+    stitched_metrics = metrics.segment_metrics(
+        total=d.total.iloc[win],
+        excess=d.excess.iloc[win],
+        market_excess=market_excess.iloc[win],
+        held=stitched_held[win],
+        gross_held=d.gross_held.iloc[win],
+        turnover=d.turnover.iloc[win],
+        cost=d.cost.iloc[win],
+        borrow=d.borrow.iloc[win],
+        trades=None,  # positions span configurations, so there are no trades to count
+    )
+    fixed_stop = min(stop, own.backtest.stop)  # the request's own run ends at its ruin day, if any
+    fixed_metrics = _fixed_metrics(own, e, fixed_stop, market_excess) if fixed_stop > e else None
+    bench = own.returns[MARKET if params.strategy == "pairs" else legs[0]]  # §6.4
+    bench_metrics = metrics.benchmark_metrics(
+        r=bench.iloc[win], rf=rf.iloc[win], market_excess=market_excess.iloc[win]
+    )
+    E0 = params.initial_capital
+    fixed_equity = np.full(stop - e + 1, np.nan)
+    if fixed_stop > e:
+        fixed_equity[: fixed_stop - e + 1] = _equity_path(E0, own.backtest.total.to_numpy()[e:fixed_stop])
+    series = pd.DataFrame(
+        {
+            "equity": _equity_path(E0, d.total.to_numpy()[win]),
+            "fixed_equity": fixed_equity,
+            "benchmark_equity": _equity_path(E0, bench.to_numpy()[win]),
+            "fold": owner[e - 1 : stop],
+        },
+        index=calendar[e - 1 : stop],
+    )
+    selected = [cell for cell, _ in chosen]
+    warnings = metrics.walk_forward_warnings(
+        selected=selected,
+        test_windows=[(calendar[fw.test_start], calendar[fw.test_end - 1]) for fw in windows],
+        ruin_date=None if r is None else calendar[r],
+    )
+    return WalkForwardResult(
+        L_values=Ls,
+        z_entry_values=zs,
+        n_configs=len(runs),
+        folds=folds,
+        n_distinct_selected=len({cell for cell in selected if cell is not None}),
+        series=series,
+        metrics=stitched_metrics,
+        fixed_metrics=fixed_metrics,
+        benchmark_metrics=bench_metrics,
+        ruined=r is not None,
+        ruin_date=None if r is None else calendar[r],
+        warnings=warnings,
+        weights=weights,
+        daily=d,
+        e=e,
+        stop=stop,
+    )
+
+
+def select_configuration(
+    runs: dict[Cell, StrategyRun],
+    excess: dict[Cell, np.ndarray],
+    held: dict[Cell, np.ndarray],
+    start: int,
+    end: int,
+) -> tuple[Cell | None, float | None]:
+    """§9.2 step 3 on the training window, calendar positions [start, end).
+
+    Args:
+        runs: the grid's runs in grid order; only each backtest's e, ruined and stop are read.
+        excess, held: each configuration's daily excess returns and held-day flags on the whole
+            calendar (positions start..end - 1 are read, so only data through the close of end - 1).
+        start, end: the training window.
+
+    Returns:
+        The eligible configuration with the highest §8 Sharpe on the window, and that Sharpe.
+        Eligible: evaluating by the window's first day, not ruined on or before its last day, and a
+        defined Sharpe there. Ties go to grid order; (None, None) when none is eligible.
+    """
+    best: Cell | None = None
+    best_sharpe: float | None = None
+    for cell, run in runs.items():  # grid order
+        bt = run.backtest
+        if bt.e > start or (bt.ruined and bt.stop <= end):  # not evaluating yet, or ruined by end - 1
+            continue
+        sharpe = metrics.sharpe(excess[cell][start:end], exposed=bool(held[cell][start:end].any()))
+        if sharpe is not None and (best_sharpe is None or sharpe > best_sharpe):
+            best, best_sharpe = cell, sharpe
+    return best, best_sharpe
+
+
+def _fixed_metrics(run: StrategyRun, start: int, stop: int, market_excess: pd.Series) -> Metrics:
+    """§8 metrics of one configuration's own backtest on calendar positions [start, stop).
+
+    The trades are those entered in the window. One still held after its last day is open there.
+    """
+    bt, calendar = run.backtest, run.prices.index
+    first, last = calendar[start], calendar[stop - 1]
+    trades = bt.trades.loc[(bt.trades["entry_date"] >= first) & (bt.trades["entry_date"] <= last)].copy()
+    trades["open"] = trades["open"] | (trades["exit_date"] > last)
+    sl = slice(start, stop)
+    return metrics.segment_metrics(
+        total=bt.total.iloc[sl],
+        excess=bt.excess.iloc[sl],
+        market_excess=market_excess.iloc[sl],
+        held=bt.held_id.iloc[sl].notna(),
+        gross_held=bt.gross_held.iloc[sl],
+        turnover=bt.turnover.iloc[sl],
+        cost=bt.cost.iloc[sl],
+        borrow=bt.borrow.iloc[sl],
+        trades=trades,
+    )
+
+
+def _equity_path(E0: float, total: np.ndarray) -> np.ndarray:
+    """A baseline point E0, then E0 compounded by each day's total return (§6.2)."""
+    out = np.empty(len(total) + 1)
+    out[0] = E0
+    out[1:] = E0 * np.cumprod(1.0 + total)
+    return out
 
 
 # ---------------------------------------------------------------- Monte Carlo inputs (§10.1)

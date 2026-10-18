@@ -30,8 +30,10 @@ from app.schemas import (
     MonteCarloResponse,
     SensitivityRequest,
     SensitivityResponse,
+    WalkForwardRequest,
+    WalkForwardResponse,
 )
-from app.serialization import backtest_payload, monte_carlo_payload, sensitivity_payload
+from app.serialization import backtest_payload, monte_carlo_payload, sensitivity_payload, walk_forward_payload
 from app.services import data_loader, monte_carlo, pipeline
 from app.services.backtester import InsufficientDataError
 from app.services.data_loader import DataSourceError
@@ -137,6 +139,23 @@ def sensitivity(request: SensitivityRequest, session: SessionDep) -> dict[str, A
         z_entry_values=None if request.z_entry_values is None else tuple(request.z_entry_values),
     )
     return sensitivity_payload(result)
+
+
+@app.post("/api/walk-forward", response_model=WalkForwardResponse)
+def walk_forward(request: WalkForwardRequest, session: SessionDep) -> dict[str, Any]:
+    """Walk-forward re-optimization over the parameter grid (§9.2). Not stored."""
+    market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
+    result = pipeline.run_walk_forward(
+        market.prices,
+        market.rf,
+        request.to_params(),
+        L_values=None if request.L_values is None else tuple(request.L_values),
+        z_entry_values=None if request.z_entry_values is None else tuple(request.z_entry_values),
+        train_days=request.train_days,
+        test_days=request.test_days,
+        anchored=request.anchored,
+    )
+    return walk_forward_payload(result, request.resolved(), market.warnings)
 
 
 @app.post("/api/monte-carlo", response_model=MonteCarloResponse)

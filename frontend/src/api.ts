@@ -1,4 +1,4 @@
-// Typed fetch wrappers for the three POST endpoints (§11.1). Every error the API returns is
+// Typed fetch wrappers for the four POST endpoints (§11.1). Every error the API returns is
 // {"detail": "..."}; ApiError carries that string so the views can show it verbatim (§13).
 import type {
   BacktestRequest,
@@ -7,6 +7,8 @@ import type {
   MonteCarloResponse,
   SensitivityRequest,
   SensitivityResponse,
+  WalkForwardRequest,
+  WalkForwardResponse,
 } from './types'
 
 // Empty = same origin. In development the Vite proxy forwards /api to uvicorn (vite.config.ts).
@@ -73,4 +75,8 @@ export function postSensitivity(request: SensitivityRequest, signal?: AbortSigna
 
 export function postMonteCarlo(request: MonteCarloRequest, signal?: AbortSignal): Promise<MonteCarloResponse> {
   return post('/api/monte-carlo', request, signal)
+}
+
+export function postWalkForward(request: WalkForwardRequest, signal?: AbortSignal): Promise<WalkForwardResponse> {
+  return post('/api/walk-forward', request, signal)
 }

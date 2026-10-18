@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildRequests, defaultForm, isoDate, L_DEFAULT, withStrategy, type FormState } from './form'
+import { buildRequests, buildWalkForward, defaultForm, isoDate, L_DEFAULT, withStrategy, type FormState } from './form'
 import type { BacktestRequest } from './types'
 
 const TODAY = '2026-10-16'
@@ -200,5 +200,42 @@ describe('sensitivity and Monte Carlo requests', () => {
     for (const bad of ['9007199254740992', '-1', '1.5', '1e3', 'abc']) {
       expect(errorOf(form({ mcSeed: bad }))).toMatch(/^Seed must be a whole number/)
     }
+  })
+})
+
+describe('the walk-forward request (§9.2, §13)', () => {
+  function walkForward(f: FormState) {
+    const result = buildWalkForward(f)
+    if (!result.ok) throw new Error(`expected a valid form, got: ${result.error}`)
+    return result.request
+  }
+
+  it('defaults to 756 training and 63 test days, rolling', () => {
+    const f = defaultForm(TODAY)
+    expect([f.wfTrainDays, f.wfTestDays, f.wfAnchored]).toEqual(['756', '63', false])
+  })
+
+  it('is the backtest request plus the fold windows, on the default grid', () => {
+    const f = form({ wfTrainDays: '504', wfTestDays: '21', wfAnchored: true })
+    expect(walkForward(f)).toEqual({ ...built(f).backtest, train_days: 504, test_days: 21, anchored: true })
+    expect(walkForward(f)).not.toHaveProperty('L_values')
+    expect(walkForward(f)).not.toHaveProperty('z_entry_values')
+  })
+
+  it('sends only the controls that apply, like the backtest', () => {
+    const trend = walkForward(withStrategy(form({ ticker: 'TLT' }), 'trend'))
+    expect(trend).toMatchObject({ strategy: 'trend', tickers: ['TLT'], L: 252, signal_frequency: 'monthly' })
+    for (const hidden of ['z_entry', 'z_exit', 'hedge_mode', 'vol_target']) expect(trend).not.toHaveProperty(hidden)
+  })
+
+  it('reports a blank or non-numeric window by its label', () => {
+    expect(buildWalkForward(form({ wfTrainDays: '' }))).toEqual({ ok: false, error: 'Training days is required.' })
+    expect(buildWalkForward(form({ wfTestDays: 'x' }))).toEqual({ ok: false, error: 'Test days must be a number.' })
+    expect(buildWalkForward(form({ L: '' }))).toEqual({ ok: false, error: 'Lookback L is required.' })
+  })
+
+  it('never blocks a Run, which does not send it', () => {
+    expect(buildRequests(form({ wfTrainDays: '', wfTestDays: 'x' })).ok).toBe(true)
+    expect(built(form())).not.toHaveProperty('walkForward')
   })
 })

@@ -114,6 +114,83 @@ class BacktestResult:
         return {"is": (self.e, min(self.split_pos, self.stop)), "oos": oos, "full": (self.e, self.stop)}
 
 
+@dataclass(frozen=True)
+class DailyReturns:
+    """The §6.1 daily components of a path of executed weights, on the full run calendar.
+
+    The value at date t is for the day ending at the close of t. Returns and costs are
+    decimals, as fractions of the day's starting equity.
+    """
+
+    w_prev: pd.DataFrame  # weights held into day t
+    gross_held: pd.Series  # sum_i |w_{i,t-1}|: gross exposure held into day t
+    gross_excess: pd.Series  # sum_i w_{i,t-1} (r_{i,t} - rf_t), before costs and borrow fees
+    borrow: pd.Series  # borrow fee on the short notional held into day t
+    turnover: pd.Series  # sum_i |w_{i,t} - w_{i,t-1}|
+    cost: pd.Series  # c * turnover, charged on the trade day
+    excess: pd.Series  # daily return in excess of rf; clip_ruin_day changes the ruin day in place
+    total: pd.Series  # rf + excess, likewise
+
+
+def daily_returns(
+    *, w: pd.DataFrame, R: pd.DataFrame, rf: pd.Series, cost_bps: float, borrow_bps: float
+) -> DailyReturns:
+    """§6.1 from the executed weights on: P&L, borrow fee, turnover, cost, excess and total returns.
+
+    Args:
+        w: executed end-of-day weights as fractions of equity, same index and columns as R. The
+            value at date t is the weight held at the close of t (already lagged, §2.2).
+        R: simple daily returns (decimals). Only the first row may be NaN.
+        rf: daily risk-free rate (decimal), same index as R.
+        cost_bps: one-way cost per unit of traded notional, per leg, in basis points.
+        borrow_bps: annual fee on the short notional held into each day, in basis points.
+
+    run_backtest applies this to W.shift(k), and the walk-forward (§9.2) to its stitched weights.
+    """
+    c = cost_bps / 10_000  # one-way, per unit of traded notional, per leg
+    w_prev = w.shift(1).fillna(0.0)  # weights held into day t
+    R = R.copy()
+    R.iloc[0] = 0.0  # only the first row may be NaN
+    if not np.isfinite(R.to_numpy()).all() or not np.isfinite(rf.to_numpy()).all():
+        raise ValueError("R (after its first row) and rf must be finite")  # .sum() would hide NaN as 0
+    gross_excess = (w_prev * R.sub(rf, axis=0)).sum(axis=1)
+    shorts = (-w_prev).clip(lower=0).sum(axis=1)  # short notional held into day t
+    borrow = (borrow_bps / 10_000 / 252) * shorts  # charged daily on it
+    turnover = (w - w_prev).abs().sum(axis=1)  # every leg counts
+    cost = c * turnover  # charged on the trade day
+    excess = gross_excess - borrow - cost  # daily return in excess of rf
+    total = rf + excess  # daily total return (cash earns rf)
+    return DailyReturns(
+        w_prev=w_prev,
+        gross_held=w_prev.abs().sum(axis=1),
+        gross_excess=gross_excess,
+        borrow=borrow,
+        turnover=turnover,
+        cost=cost,
+        excess=excess,
+        total=total,
+    )
+
+
+def first_ruin_day(total: pd.Series, start: int, end: int | None = None) -> int | None:
+    """Calendar position of the first day in [start, end) whose total return is <= -1 (§6.2), or None."""
+    hits = np.flatnonzero(total.to_numpy()[start:end] <= -1.0)
+    return start + int(hits[0]) if hits.size else None
+
+
+def clip_ruin_day(excess: pd.Series, total: pd.Series, rf: pd.Series, r: int) -> float:
+    """Clip day r's total return to exactly -1 in place (§6.2): limited liability, so E_r = 0.
+
+    Returns the amount by which day r's excess return was raised (>= 0), which run_backtest
+    credits to the trade held into r so that the trades still reconcile (§7.2).
+    """
+    clipped = -1.0 - rf.iloc[r]  # excess return that makes total exactly -1
+    credit = clipped - excess.iloc[r]
+    excess.iloc[r] = clipped
+    total.iloc[r] = -1.0
+    return credit
+
+
 def run_backtest(
     *,
     R: pd.DataFrame,
@@ -168,21 +245,10 @@ def run_backtest(
         )
 
     # §6.1, computed on the full run calendar.
-    c = cost_bps / 10_000  # one-way, per unit of traded notional, per leg
     w = W.shift(k).fillna(0.0)  # executed end-of-day weights
     pos = s.shift(k).fillna(0.0)  # executed position (used to identify trades)
-    w_prev = w.shift(1).fillna(0.0)  # weights held into day t
-    R = R.copy()
-    R.iloc[0] = 0.0  # only the first row may be NaN
-    if not np.isfinite(R.to_numpy()).all() or not np.isfinite(rf.to_numpy()).all():
-        raise ValueError("R (after its first row) and rf must be finite")  # .sum() would hide NaN as 0
-    gross_excess = (w_prev * R.sub(rf, axis=0)).sum(axis=1)
-    shorts = (-w_prev).clip(lower=0).sum(axis=1)  # short notional held into day t
-    borrow = (borrow_bps / 10_000 / 252) * shorts  # charged daily on it
-    turnover = (w - w_prev).abs().sum(axis=1)  # every leg counts
-    cost = c * turnover  # charged on the trade day
-    excess = gross_excess - borrow - cost  # daily return in excess of rf
-    total = rf + excess  # daily total return (cash earns rf)
+    d = daily_returns(w=w, R=R, rf=rf, cost_bps=cost_bps, borrow_bps=borrow_bps)
+    gross_excess, borrow, cost, excess, total = d.gross_excess, d.borrow, d.cost, d.excess, d.total
 
     # §7: trades are runs of non-zero, same-sign executed position.
     trade_id = (pos.ne(pos.shift()) & pos.ne(0)).cumsum().where(pos.ne(0))  # NaN when flat
@@ -190,20 +256,16 @@ def run_backtest(
 
     # §6.2 ruin: the first evaluated day with total <= -1 ends the window.
     credit = pd.Series(0.0, index=calendar)
-    hits = np.flatnonzero(total.to_numpy()[e:] <= -1.0)
-    ruined = hits.size > 0
-    stop = e + int(hits[0]) + 1 if ruined else n
+    r = first_ruin_day(total, e)
+    ruined = r is not None
+    stop = r + 1 if ruined else n
     if ruined:
-        r = stop - 1
         if pd.isna(held_id.iloc[r]):
             raise ValueError("ruin on a day with no position held into it; the cost inputs are out of range")
-        clipped = -1.0 - rf.iloc[r]  # excess return that makes total exactly -1
-        credit.iloc[r] = clipped - excess.iloc[r]  # >= 0, credited to the trade held into r
-        excess.iloc[r] = clipped
-        total.iloc[r] = -1.0
+        credit.iloc[r] = clip_ruin_day(excess, total, rf, r)  # >= 0, credited to the trade held into r
 
     # §7.1 attribution follows P&L timing, within the evaluation window.
-    a = w_prev.abs().sum(axis=1)
+    a = d.gross_held
     b = w.abs().sum(axis=1)
     exit_frac = (a / (a + b).where(a + b > 0)).fillna(0.0)
     to_held = gross_excess - borrow - cost * exit_frac + credit  # attributed to held_id
@@ -235,7 +297,7 @@ def run_backtest(
         gross_held=a.rename("gross_held"),
         gross_excess=gross_excess.rename("gross_excess"),
         borrow=borrow.rename("borrow"),
-        turnover=turnover.rename("turnover"),
+        turnover=d.turnover.rename("turnover"),
         cost=cost.rename("cost"),
         excess=excess.rename("excess"),
         total=total.rename("total"),

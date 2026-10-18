@@ -201,6 +201,26 @@ class SensitivityRequest(BacktestRequest):
         return self
 
 
+class WalkForwardRequest(SensitivityRequest):
+    """POST /api/walk-forward: a sensitivity request plus the fold windows (§9.2)."""
+
+    train_days: int = Field(756, ge=252, le=2520, description="Training window, trading days")
+    test_days: int = Field(63, ge=21, le=252, description="Test window, trading days")
+    anchored: bool = Field(False, description="true: every training window starts at the grid's common start")
+
+    def resolved(self) -> dict[str, Any]:
+        """The backtest fields as BacktestRequest.resolved() echoes them, plus the fold windows.
+
+        The route adds the grid actually used (L_values, z_entry_values).
+        """
+        return {
+            **super().resolved(),
+            "train_days": self.train_days,
+            "test_days": self.test_days,
+            "anchored": self.anchored,
+        }
+
+
 class MonteCarloRequest(BaseModel):
     """POST /api/monte-carlo. The history is a strategy's returns or one ticker's returns (§10)."""
 
@@ -465,6 +485,50 @@ class SensitivityResponse(BaseModel):
     window: WindowOut
     selected: SelectedCellOut | None
     deflated: DeflatedOut
+
+
+class ResolvedWalkForwardRun(ResolvedBacktestRequest):
+    train_days: int
+    test_days: int
+    anchored: bool
+    L_values: list[int]  # the grid actually used
+    z_entry_values: list[float] | None  # null for trend
+
+
+class FoldOut(BaseModel):
+    """One walk-forward fold (§9.2); dates are inclusive."""
+
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
+    selected: SelectedCellOut | None  # null = flat fold: no configuration was eligible
+    train_sharpe: float | None
+    test_sharpe: float | None
+
+
+class WalkForwardSeriesOut(BaseModel):
+    """Aligned arrays from the baseline day b0 - 2 to the last stitched day."""
+
+    dates: list[str]
+    equity: list[float | None]
+    fixed_equity: list[float | None]  # null after the request's own configuration was ruined
+    benchmark_equity: list[float | None]
+    fold: list[int | None]  # the fold that owns each day; null on the baseline
+
+
+class WalkForwardResponse(BaseModel):
+    resolved: ResolvedWalkForwardRun
+    folds: list[FoldOut]
+    n_configs: int
+    n_distinct_selected: int
+    series: WalkForwardSeriesOut
+    metrics: MetricsOut  # the stitched series: the trade fields are null
+    fixed_metrics: MetricsOut | None  # null if the request's own configuration was ruined before the window
+    benchmark_metrics: MetricsOut
+    ruined: bool
+    ruin_date: str | None
+    warnings: list[str]
 
 
 class BandsOut(BaseModel):

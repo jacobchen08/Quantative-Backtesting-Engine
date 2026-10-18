@@ -4,7 +4,7 @@ import { DASH, fmtInt, fmtNum } from '../format'
 import type { Async } from '../state'
 import { divergingColor, heatmapBound, heatmapLayout, zEntryLabel } from '../transform'
 import type { Deflated, SensitivityResponse } from '../types'
-import { AsyncNotice, Panel } from './ui'
+import { AsyncNotice, Panel, Stat } from './ui'
 
 function Legend(props: { bound: number }) {
   const stops = [-1, -0.5, 0, 0.5, 1].map((t) => divergingColor(t * props.bound, props.bound))
@@ -58,16 +58,6 @@ function Heatmap(props: { data: SensitivityResponse }) {
       </div>
       <Legend bound={bound} />
       <DeflatedSummary deflated={props.data.deflated} />
-    </div>
-  )
-}
-
-function Stat(props: { label: string; value: string; sub: string; title?: string }) {
-  return (
-    <div className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2" title={props.title}>
-      <p className="text-[11px] text-neutral-500">{props.label}</p>
-      <p className="text-lg leading-tight text-neutral-100 tabular-nums">{props.value}</p>
-      <p className="text-[11px] text-neutral-500 tabular-nums">{props.sub}</p>
     </div>
   )
 }

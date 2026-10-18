@@ -24,6 +24,7 @@ export const COLORS = {
   path: '#d4d4d4', // neutral-300, drawn at low opacity
   hist: '#60a5fa',
   var: '#ef4444', // red-500
+  fixed: '#60a5fa', // blue-400: the walk-forward's fixed-parameter comparison
 } as const
 
 /** Every backtest chart shares this syncId and the same `series` rows, so their indexes line up (§13). */

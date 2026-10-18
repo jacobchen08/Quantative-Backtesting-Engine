@@ -38,6 +38,12 @@ export type SensitivityRequest = BacktestRequest & {
   z_entry_values?: number[] | null
 }
 
+export type WalkForwardRequest = SensitivityRequest & {
+  train_days?: number
+  test_days?: number
+  anchored?: boolean
+}
+
 export type MonteCarloRequest = {
   source: 'strategy' | 'ticker'
   backtest?: BacktestRequest | null
@@ -148,6 +154,19 @@ export type SensitivityResponse = {
               selected_dsr: number | null;
               best: { L: number; z_entry: number | null; sharpe: number; dsr: number | null } | null };
 };
+export type WalkForwardResponse = {                                    // Phase 6, §9.2
+  resolved: ResolvedBacktestRequest & { train_days: number; test_days: number; anchored: boolean;
+                                        L_values: number[]; z_entry_values: number[] | null };
+  folds: { train_start: string; train_end: string; test_start: string; test_end: string;   // inclusive dates
+           selected: { L: number; z_entry: number | null } | null;                          // null = flat fold
+           train_sharpe: number | null; test_sharpe: number | null }[];
+  n_configs: number; n_distinct_selected: number;
+  series: { dates: string[]; equity: (number | null)[]; fixed_equity: (number | null)[];
+            benchmark_equity: (number | null)[]; fold: (number | null)[] };   // fold index of each test day
+  metrics: Metrics; fixed_metrics: Metrics | null; benchmark_metrics: Metrics;   // stitched metrics have null trade fields;
+                                                                                 // fixed_metrics null if that run was ruined before the window
+  ruined: boolean; ruin_date: string | null; warnings: string[];
+};
 export type ModelResult = {
   bands: { p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] };   // length T+1
   sample_paths: number[][];        // 20 x (T+1) equity multiples
@@ -171,3 +190,6 @@ export type ResolvedBacktestRun = BacktestResponse['resolved']
 export type CostSensitivity = NonNullable<BacktestResponse['cost_sensitivity']>
 export type CalendarReturns = BacktestResponse['calendar']
 export type Deflated = SensitivityResponse['deflated']
+export type Fold = WalkForwardResponse['folds'][number]
+export type GridCell = NonNullable<Fold['selected']>
+export type WalkForwardSeries = WalkForwardResponse['series']

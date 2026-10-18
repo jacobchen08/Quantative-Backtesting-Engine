@@ -3,6 +3,8 @@ import { fmtLag, fmtMultiple, fmtRate } from './format'
 import type {
   CalendarReturns,
   CostSensitivity,
+  Fold,
+  GridCell,
   ModelResult,
   ResolvedBacktestRun,
   SegmentKey,
@@ -10,6 +12,7 @@ import type {
   Series,
   Strategy,
   Trade,
+  WalkForwardSeries,
 } from './types'
 
 // ---------------------------------------------------------------- backtest series
@@ -356,4 +359,58 @@ export function calendarGrid(cal: CalendarReturns): { years: CalendarYear[]; bou
   }
   const bound = Math.max(0.02, ...cal.monthly.map((m) => Math.abs(m.strategy)))
   return { years: [...years.values()].sort((a, b) => a.year - b.year), bound }
+}
+
+// ---------------------------------------------------------------- walk-forward (§9.2)
+
+export type WalkForwardRow = {
+  date: string
+  equity: number | null // the stitched walk-forward
+  fixed: number | null // the request's own configuration over the same days
+  benchmark: number | null
+  fold: number | null // the fold that owns the day; null on the baseline
+}
+
+/** One row per walk-forward series date, nulls included, like seriesRows. */
+export function walkForwardRows(series: WalkForwardSeries): WalkForwardRow[] {
+  const n = series.dates.length
+  const arrays = [series.equity, series.fixed_equity, series.benchmark_equity, series.fold]
+  if (arrays.some((a) => a.length !== n)) throw new Error('The walk-forward series arrays have different lengths.')
+  return series.dates.map((date, i) => ({
+    date,
+    equity: series.equity[i],
+    fixed: series.fixed_equity[i],
+    benchmark: series.benchmark_equity[i],
+    fold: series.fold[i],
+  }))
+}
+
+export type FoldBand = { fold: number; x1: string; x2: string }
+
+/**
+ * The first and last date of every odd-numbered fold (1, 3, ...): the chart shades alternate test
+ * folds (§13, view 11), so each boundary between folds is visible.
+ */
+export function foldBands(series: WalkForwardSeries): FoldBand[] {
+  const bands: FoldBand[] = []
+  series.fold.forEach((fold, i) => {
+    if (fold === null) return
+    const last = bands.at(-1)
+    if (last?.fold === fold) last.x2 = series.dates[i]
+    else bands.push({ fold, x1: series.dates[i], x2: series.dates[i] })
+  })
+  return bands.filter((band) => band.fold % 2 === 1)
+}
+
+/** "L 60 · z 2.0" for mean reversion and pairs, "L 252 (12m)" for trend, "flat" for no choice. */
+export function configLabel(cell: GridCell | null): string {
+  if (cell === null) return 'flat'
+  return cell.z_entry === null ? `L ${lookbackLabel(cell.L)}` : `L ${cell.L} · ${zEntryLabel(cell.z_entry)}`
+}
+
+/** Whether each fold chose differently from the fold before it. A flat fold counts as a choice. */
+export function selectionChanges(folds: readonly Fold[]): boolean[] {
+  const same = (a: GridCell | null, b: GridCell | null) =>
+    a === null || b === null ? a === b : a.L === b.L && a.z_entry === b.z_entry
+  return folds.map((fold, i) => i > 0 && !same(fold.selected, folds[i - 1].selected))
 }

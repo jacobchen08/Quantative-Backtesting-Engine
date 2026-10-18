@@ -4,6 +4,7 @@ This script is the only source for runtime claims (§0, rule 4). It prints the h
 Python and library versions, then:
 - each §14 workload of the phases built so far, against its target;
 - the 15-year pairs backtest broken down by stage;
+- the default walk-forward on the same pair, as a request and as run_walk_forward alone;
 - the same backtest repeated with only z_entry or only L changed, the case the diagnostics
   cache (§14) is for;
 - the Monte Carlo time per model, and the peak memory of one run at the API caps.
@@ -51,7 +52,7 @@ from app import __version__
 from app.database import Base, get_session, make_engine
 from app.diagnostics_cache import DiagnosticsCache
 from app.main import app, diagnostics_cache
-from app.schemas import BacktestRequest, BacktestResponse
+from app.schemas import BacktestRequest, BacktestResponse, WalkForwardRequest
 from app.serialization import backtest_payload
 from app.services import data_loader, monte_carlo, pipeline, stats
 from app.services.pipeline import BacktestReport
@@ -301,6 +302,28 @@ def parameter_iteration(
     return times, f"{diagnostics_cache.hits - hits} hits, {diagnostics_cache.misses - misses} misses"
 
 
+def walk_forward_alone(factory: sessionmaker[Session], repeats: int) -> tuple[list[float], dict[str, int]]:
+    """pipeline.run_walk_forward on the loaded 15-year data, without loading or serialization.
+
+    Returns the times and the shape of one result: folds, configurations and distinct choices.
+    """
+    request = WalkForwardRequest.model_validate(BACKTEST)
+    with factory() as session:
+        market = data_loader.load_market(
+            session, request.tickers, request.start, request.end, request.risk_free
+        )
+    params = request.to_params()
+    times = repeat(lambda: pipeline.run_walk_forward(market.prices, market.rf, params), repeats)
+    result = pipeline.run_walk_forward(market.prices, market.rf, params)
+    shape = {
+        "folds": len(result.folds),
+        "configs": result.n_configs,
+        "distinct": result.n_distinct_selected,
+        "days": result.metrics.n_days,
+    }
+    return times, shape
+
+
 def monte_carlo_peak_mb(factory: sessionmaker[Session]) -> float:
     """Peak traced memory (MB, 10^6 bytes) of one simulate() call at the API caps (§10.6, §14).
 
@@ -366,6 +389,8 @@ def main() -> None:
         ),
     ]
     sensitivity = repeat(lambda: post(client, "/api/sensitivity", BACKTEST), repeats)
+    walk_forward = repeat(lambda: post(client, "/api/walk-forward", BACKTEST), repeats)
+    walk_forward_core, wf_shape = walk_forward_alone(factory, repeats)
     mc_request: list[float] = []
     inside: dict[str, list[float]] = {"total": [], "gbm": [], "bootstrap": []}  # simulate()'s own timers
     gc.collect()
@@ -405,6 +430,7 @@ def main() -> None:
         row("15-year pairs backtest, first request on the data (diagnostics computed)", cold, 300),
         row("15-year pairs backtest, z_entry changed (diagnostics cached)", iteration[0][1][0], 300),
         row("Default sensitivity grid (20 configurations)", sensitivity, 5000),
+        row("Default walk-forward, 15-year pairs (20 configurations)", walk_forward, 8000),
         row("Default Monte Carlo, 10,000 x 252, both models: the request", mc_request, 1000),
         row("Default Monte Carlo: the simulation alone (elapsed_ms_total)", inside["total"], 1000),
         "",
@@ -423,6 +449,16 @@ def main() -> None:
         "",
         *table("Field changed", "Median", "Min", "Max", "Diagnostics cache"),
         *(row(label, times, extra=cache) for label, (times, cache) in iteration),
+        "",
+        "## Walk-forward (default: 756 training and 63 test days, rolling)",
+        "",
+        *table("Stage", "Median", "Min", "Max"),
+        row("The request (as in the first table)", walk_forward),
+        row("run_walk_forward alone (no loading or serialization)", walk_forward_core),
+        "",
+        f"It backtests {wf_shape['configs']} grid configurations plus the request's own, then makes "
+        f"{wf_shape['folds']} folds: {wf_shape['days']:,} out-of-sample days, on which "
+        f"{wf_shape['distinct']} distinct configurations were chosen.",
         "",
         "## Monte Carlo",
         "",

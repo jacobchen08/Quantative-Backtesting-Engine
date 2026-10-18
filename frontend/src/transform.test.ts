@@ -3,10 +3,12 @@ import {
   assumptionLines,
   benchmarkName,
   calendarGrid,
+  configLabel,
   costSweepView,
   divergingColor,
   fanRows,
   firstOosIndex,
+  foldBands,
   heatmapBound,
   heatmapLayout,
   histogramRows,
@@ -14,17 +16,21 @@ import {
   niceTicks,
   NULL_CELL,
   segmentRange,
+  selectionChanges,
   seriesRows,
   sortTrades,
+  walkForwardRows,
 } from './transform'
 import type {
   CalendarReturns,
   CostSensitivity,
+  Fold,
   ModelResult,
   ResolvedBacktestRun,
   SensitivityResponse,
   Series,
   Trade,
+  WalkForwardSeries,
 } from './types'
 
 // Six days from s0: two warm-up days with no equity yet, the baseline on day 2, then three
@@ -427,5 +433,90 @@ describe('calendar grid (§8.2)', () => {
 
   it('rejects a month whose year has no annual row', () => {
     expect(() => calendarGrid({ ...calendar, annual: calendar.annual.slice(1) })).toThrow(/2020-11/)
+  })
+})
+
+// ---------------------------------------------------------------- walk-forward (§9.2)
+
+// The baseline, fold 0's entry day and two test days, then folds 1 and 2 of two days and a one-day fold 3.
+function makeWalkForwardSeries(overrides: Partial<WalkForwardSeries> = {}): WalkForwardSeries {
+  return {
+    dates: ['2021-01-04', '2021-01-05', '2021-01-06', '2021-01-07', '2021-01-08', '2021-01-11', '2021-01-12', '2021-01-13', '2021-01-14'],
+    equity: [100000, 99990, 100200, 100100, 100500, 100400, 100900, 101000, 100800],
+    fixed_equity: [100000, 100100, 100300, 100250, 0, null, null, null, null], // ruined on 2021-01-08
+    benchmark_equity: [100000, 100050, 100120, 100300, 100200, 100600, 100700, 100650, 100900],
+    fold: [null, 0, 0, 0, 1, 1, 2, 2, 3],
+    ...overrides,
+  }
+}
+
+function fold(selected: Fold['selected'], overrides: Partial<Fold> = {}): Fold {
+  return {
+    train_start: '2018-01-02',
+    train_end: '2020-12-31',
+    test_start: '2021-01-04',
+    test_end: '2021-03-31',
+    selected,
+    train_sharpe: selected === null ? null : 0.8,
+    test_sharpe: null,
+    ...overrides,
+  }
+}
+
+describe('walkForwardRows', () => {
+  it('keeps one row per date with every series, nulls included', () => {
+    const series = makeWalkForwardSeries()
+    const rows = walkForwardRows(series)
+    expect(rows.map((r) => r.date)).toEqual(series.dates)
+    expect(rows.map((r) => r.equity)).toEqual(series.equity)
+    expect(rows.map((r) => r.fixed)).toEqual(series.fixed_equity) // a gap after the fixed run's ruin
+    expect(rows.map((r) => r.benchmark)).toEqual(series.benchmark_equity)
+    expect(rows.map((r) => r.fold)).toEqual(series.fold)
+  })
+
+  it('rejects arrays of different lengths', () => {
+    expect(() => walkForwardRows(makeWalkForwardSeries({ fold: [null, 0] }))).toThrow(/different lengths/)
+    expect(() => walkForwardRows(makeWalkForwardSeries({ fixed_equity: [] }))).toThrow(/different lengths/)
+  })
+})
+
+describe('foldBands: alternate test folds are shaded (§13, view 11)', () => {
+  it('spans each odd fold from its first to its last date', () => {
+    expect(foldBands(makeWalkForwardSeries())).toEqual([
+      { fold: 1, x1: '2021-01-08', x2: '2021-01-11' },
+      { fold: 3, x1: '2021-01-14', x2: '2021-01-14' }, // a one-day fold
+    ])
+  })
+
+  it('shades nothing with a single fold, and skips the baseline', () => {
+    const one = makeWalkForwardSeries({ fold: [null, 0, 0, 0, 0, 0, 0, 0, 0] })
+    expect(foldBands(one)).toEqual([])
+    const two = makeWalkForwardSeries({ fold: [null, 0, 0, 0, 0, 1, 1, 1, 1] })
+    expect(foldBands(two)).toEqual([{ fold: 1, x1: '2021-01-11', x2: '2021-01-14' }])
+  })
+})
+
+describe('the fold table', () => {
+  it('labels a configuration like the heatmap, and a flat fold as flat', () => {
+    expect(configLabel({ L: 60, z_entry: 2 })).toBe('L 60 · z 2.0')
+    expect(configLabel({ L: 40, z_entry: 2.25 })).toBe('L 40 · z 2.25')
+    expect(configLabel({ L: 252, z_entry: null })).toBe('L 252 (12m)') // trend
+    expect(configLabel({ L: 250, z_entry: null })).toBe('L 250')
+    expect(configLabel(null)).toBe('flat')
+  })
+
+  it('marks every fold whose choice differs from the one before, by value', () => {
+    const folds = [
+      fold({ L: 60, z_entry: 2 }),
+      fold({ L: 60, z_entry: 2 }), // equal but a different object: no change
+      fold({ L: 60, z_entry: 2.5 }),
+      fold(null),
+      fold(null),
+      fold({ L: 20, z_entry: 2.5 }),
+      fold({ L: 20, z_entry: null }),
+    ]
+    expect(selectionChanges(folds)).toEqual([false, false, true, true, false, true, true])
+    expect(selectionChanges([fold({ L: 20, z_entry: 1.5 }), fold(null)])).toEqual([false, true]) // the second fold
+    expect(selectionChanges([])).toEqual([])
   })
 })

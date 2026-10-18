@@ -10,11 +10,11 @@ import {
   fmtMultiple,
   fmtNum,
   fmtPct,
+  fmtPerYear,
   fmtPValue,
   fmtRate,
   fmtSignedPct,
   fmtTurnover,
-  isNum,
 } from '../format'
 import type { Async } from '../state'
 import { benchmarkName, segmentRange } from '../transform'
@@ -49,14 +49,12 @@ const KPIS: readonly Kpi[] = [
   { label: 'Avg gross exposure', value: (m) => fmtMultiple(m.avg_gross_exposure), title: 'Held into each day; flat days count as 0' },
 ]
 
-const perYear = (x: number | null) => (isNum(x) ? `${fmtPct(x, 2)}/yr` : DASH)
-
 const COST_KPIS: readonly Kpi[] = [
   { label: 'Turnover', value: (m) => fmtTurnover(m.ann_turnover), bench: false },
-  { label: 'Cost drag', value: (m) => perYear(m.ann_cost_drag), bench: false, title: 'Trading costs: mean daily cost × 252' },
+  { label: 'Cost drag', value: (m) => fmtPerYear(m.ann_cost_drag), bench: false, title: 'Trading costs: mean daily cost × 252' },
   {
     label: 'Borrow drag',
-    value: (m) => perYear(m.ann_borrow_drag),
+    value: (m) => fmtPerYear(m.ann_borrow_drag),
     bench: false,
     title: 'Borrow fees on short notional: mean daily fee × 252',
   },

@@ -18,7 +18,7 @@ from yfinance.exceptions import YFRateLimitError
 from app import __version__
 from app.main import app, diagnostics_cache
 from app.models import BacktestRun
-from app.schemas import BacktestResponse, MonteCarloResponse, SensitivityResponse
+from app.schemas import BacktestResponse, MonteCarloResponse, SensitivityResponse, WalkForwardResponse
 from app.serialization import to_jsonable
 from app.services import stats
 
@@ -164,6 +164,54 @@ def test_sensitivity(client: TestClient) -> None:
     )
 
 
+def test_walk_forward(client: TestClient) -> None:
+    out = post(
+        client, "/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    WalkForwardResponse.model_validate(out)
+    resolved, folds, series = out["resolved"], out["folds"], out["series"]
+    assert (resolved["train_days"], resolved["test_days"], resolved["anchored"]) == (756, 63, False)
+    assert resolved["L_values"] == [20, 40, 60, 90, 120] and resolved["z_entry_values"] == [
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+    ]
+    assert resolved["split_date"] is None and resolved["borrow_bps"] == 0.0  # the request, as sent
+    assert out["n_configs"] == 20 and len(folds) == 2  # 1,000 days: s = 120 and b0 = 876, so two folds
+    assert 1 <= out["n_distinct_selected"] <= len(folds)
+    assert folds[0]["test_start"] < folds[0]["test_end"] < folds[1]["test_start"] <= folds[1]["test_end"]
+    assert folds[1]["train_start"] > folds[0]["train_start"]  # rolling
+    lengths = {name: len(values) for name, values in series.items()}
+    assert len(set(lengths.values())) == 1, lengths
+    assert series["fold"][0] is None and series["fold"][1] == 0 and series["fold"][-1] == 1
+    assert series["equity"][0] == series["fixed_equity"][0] == series["benchmark_equity"][0] == 100_000
+    assert series["dates"][-1] == folds[-1]["test_end"] and not out["ruined"]
+    m, fixed = out["metrics"], out["fixed_metrics"]
+    assert m["n_closed_trades"] is m["n_open_trades"] is m["win_rate"] is m["avg_holding_days"] is None
+    assert m["ann_turnover"] is not None and fixed["n_closed_trades"] is not None
+    assert m["n_days"] == fixed["n_days"] == out["benchmark_metrics"]["n_days"] == len(series["dates"]) - 1
+
+
+def test_walk_forward_for_trend_has_no_z_axis(client: TestClient) -> None:
+    request = {
+        "strategy": "trend",
+        "tickers": ["SPY"],
+        "start": START,
+        "end": END,
+        "z_entry_values": [2.0],  # ignored for trend
+        "train_days": 252,
+        "test_days": 126,
+        "anchored": True,
+    }
+    out = post(client, "/api/walk-forward", request)
+    WalkForwardResponse.model_validate(out)
+    assert out["resolved"]["z_entry_values"] is None and out["resolved"]["z_entry"] is None
+    assert out["resolved"]["L_values"] == [21, 63, 126, 252, 378] and out["n_configs"] == 5
+    assert len({f["train_start"] for f in out["folds"]}) == 1  # anchored: one common start
+    assert all(f["selected"] is None or f["selected"]["z_entry"] is None for f in out["folds"])
+
+
 @pytest.mark.parametrize(
     "request_fields",
     [
@@ -229,6 +277,8 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         ),
         ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": 2001}, "borrow_bps"),
         ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": -1}, "borrow_bps"),
+        ("/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "test_days": 20}, "test_days"),
+        ("/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "train_days": 251}, "train_days"),
     ],
     ids=[
         "z_exit>=z_entry",
@@ -245,14 +295,15 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         "pairs-long-only",
         "borrow-over-2000",
         "borrow-negative",
+        "walk-forward-test-days-20",
+        "walk-forward-train-days-251",
     ],
 )
 def test_invalid_requests_are_422_with_a_readable_detail(
     client: TestClient, path: str, payload: dict, phrase: str
 ) -> None:
-    dates = (
-        {"start": START, "end": END} if path == "/api/backtest" or payload.get("source") == "ticker" else {}
-    )
+    with_dates = path in ("/api/backtest", "/api/walk-forward") or payload.get("source") == "ticker"
+    dates = {"start": START, "end": END} if with_dates else {}
     out = post(client, path, {**dates, **payload}, status=422)
     assert isinstance(out["detail"], str) and phrase in out["detail"], out["detail"]
 
@@ -301,6 +352,9 @@ def test_only_backtests_are_stored(client: TestClient, db_engine: Engine) -> Non
     assert stored == {"metrics": out["metrics"], "benchmark_metrics": out["benchmark_metrics"]}
     post(client, "/api/sensitivity", request)
     post(client, "/api/monte-carlo", {"source": "strategy", "backtest": request, **SMALL_MC})
+    post(
+        client, "/api/walk-forward", {**request, "L_values": [60], "z_entry_values": [2.0], "train_days": 252}
+    )
     assert count_runs(db_engine) == 1
 
 
