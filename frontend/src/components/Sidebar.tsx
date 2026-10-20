@@ -126,7 +126,7 @@ export function Sidebar(props: {
       }}
     >
       <div className="border-b border-neutral-800 px-4 py-3">
-        <h1 className="text-sm font-semibold tracking-widest text-emerald-400 uppercase">Quant Engine</h1>
+        <h1 className="text-sm font-semibold tracking-widest text-emerald-400 uppercase">Quantitative Backtesting Engine</h1>
         <p className="text-[11px] text-neutral-500">Backtests · sensitivity · walk-forward · Monte&nbsp;Carlo</p>
       </div>
 

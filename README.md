@@ -1,4 +1,4 @@
-# Quant Engine
+# Quantitative Backtesting Engine
 
 A backtesting and Monte Carlo risk engine for daily US equity strategies, with a React dashboard. It runs four strategies:
 - single-asset mean reversion;
