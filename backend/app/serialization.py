@@ -67,11 +67,20 @@ def backtest_payload(
     series = {
         "dates": s.index,
         **{name: s[name] for name in ("equity", "benchmark_equity", "drawdown", "daily_return")},
-        **{name: s[name] for name in ("position", "gross_exposure", "score")},
-        **{name: s[name] if name in s else None for name in ("beta", "beta_used", "vol_forecast")},
+        **{name: s[name] for name in ("position", "gross_exposure")},
+        **{name: s[name] if name in s else None for name in ("score", "beta", "beta_used", "vol_forecast")},
         "is_oos": s["is_oos"],
         "rolling_sharpe": s["rolling_sharpe"],
         "rolling_beta": s["rolling_beta"],
+        "legs": None
+        if report.legs is None
+        else [
+            {
+                "ticker": ticker,
+                **{name: leg[name] for name in ("score", "position", "weight", "vol_forecast")},
+            }
+            for ticker, leg in report.legs.items()
+        ],
     }
     diagnostics = None
     if d is not None:
@@ -204,9 +213,11 @@ def monte_carlo_payload(result: MonteCarloResult, resolved: dict[str, Any]) -> d
                 "n_hist": result.n_hist,
                 "mu_daily": result.mu_daily,
                 "sigma_daily": result.sigma_daily,
+                "block_len_used": result.block_len_used,
             },
             "gbm": _model_payload(result.gbm),
             "bootstrap": _model_payload(result.bootstrap),
+            "stationary": _model_payload(result.stationary),
             "closed_form_gbm": result.closed_form_gbm,
             "hist_edges": result.hist_edges,
             "elapsed_ms_total": result.elapsed_ms_total,

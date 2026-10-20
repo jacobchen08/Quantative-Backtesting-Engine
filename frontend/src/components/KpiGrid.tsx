@@ -17,7 +17,7 @@ import {
   fmtTurnover,
 } from '../format'
 import type { Async } from '../state'
-import { benchmarkName, segmentRange } from '../transform'
+import { benchmarkLabels, segmentRange } from '../transform'
 import type { BacktestResponse, Metrics, MonteCarloResponse, SegmentKey } from '../types'
 import { Panel, Segmented, Toggle } from './ui'
 
@@ -113,9 +113,11 @@ const SEGMENTS = [
 
 const RISK_TILES = [
   { label: 'VaR95 GBM', model: 'gbm', key: 'var95' },
-  { label: 'VaR95 bootstrap', model: 'bootstrap', key: 'var95' },
+  { label: 'VaR95 block boot.', model: 'bootstrap', key: 'var95' },
+  { label: 'VaR95 stationary', model: 'stationary', key: 'var95' },
   { label: 'CVaR95 GBM', model: 'gbm', key: 'cvar95' },
-  { label: 'CVaR95 bootstrap', model: 'bootstrap', key: 'cvar95' },
+  { label: 'CVaR95 block boot.', model: 'bootstrap', key: 'cvar95' },
+  { label: 'CVaR95 stationary', model: 'stationary', key: 'cvar95' },
 ] as const
 
 function riskValue(mc: Async<MonteCarloResponse>, tile: (typeof RISK_TILES)[number]): string {
@@ -134,8 +136,9 @@ export const KpiGrid = memo(function KpiGrid(props: {
   const { backtest: bt, monteCarlo: mc, showBenchmark, segment } = props
   const m = bt.metrics[segment]
   const b = bt.benchmark_metrics[segment]
-  const bench = benchmarkName(bt.resolved.strategy, bt.resolved.tickers)
+  const bench = benchmarkLabels(bt.resolved.strategy, bt.resolved.tickers)
   const { sizing, diagnostics } = bt
+  const portfolio = bt.resolved.strategy === 'trend_portfolio'
   const segmentNote = segmentRange(bt.resolved, bt.ruin_date, segment)
 
   return (
@@ -144,13 +147,13 @@ export const KpiGrid = memo(function KpiGrid(props: {
       subtitle={
         <>
           {segmentNote}
-          {m && ` · ${fmtInt(m.n_days)} evaluated days`} · benchmark: buy &amp; hold {bench}
+          {m && ` · ${fmtInt(m.n_days)} evaluated days`} · benchmark: {bench.phrase}
         </>
       }
       actions={
         <div className="flex items-center gap-2">
           <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the KPI tiles and the chart">
-            Buy &amp; hold {bench}
+            {bench.name}
           </Toggle>
           <Segmented label="Segment" value={segment} options={SEGMENTS} onChange={props.onSegment} />
         </div>
@@ -163,14 +166,23 @@ export const KpiGrid = memo(function KpiGrid(props: {
           </p>
         ) : (
           <>
-            <Group title="Strategy" note={showBenchmark && <span className="text-slate-400">grey: buy &amp; hold {bench}</span>}>
+            <Group
+              title="Strategy"
+              note={
+                <>
+                  {showBenchmark && <span className="text-slate-400">grey: {bench.phrase}</span>}
+                  {showBenchmark && portfolio && ' · '}
+                  {portfolio && <span>the trade figures count every leg’s trades</span>}
+                </>
+              }
+            >
               {KPIS.map((k) => (
                 <Tile
                   key={k.label}
                   label={k.label}
                   value={k.value(m)}
                   sub={k.sub?.(m)}
-                  bench={!showBenchmark || k.bench === false ? undefined : `B&H ${k.value(b)}`}
+                  bench={!showBenchmark || k.bench === false ? undefined : `${bench.tag} ${k.value(b)}`}
                   title={k.title}
                 />
               ))}
@@ -185,19 +197,35 @@ export const KpiGrid = memo(function KpiGrid(props: {
         )}
 
         {sizing && (
-          <Group title="Vol targeting">
-            <Tile label="Vol target" value={fmtRate(sizing.vol_target)} sub={`max ${fmtMultiple(sizing.max_leverage, 1)} leverage`} />
+          <Group title="Vol targeting" note={portfolio ? 'always on: each leg is sized to the target on its own' : undefined}>
+            <Tile
+              label={portfolio ? 'Target per asset' : 'Vol target'}
+              value={fmtRate(sizing.vol_target)}
+              sub={
+                portfolio
+                  ? `each leg ≤ ${fmtMultiple(sizing.max_leverage / bt.resolved.tickers.length, 2)} of ${fmtMultiple(sizing.max_leverage, 1)}`
+                  : `max ${fmtMultiple(sizing.max_leverage, 1)} leverage`
+              }
+            />
             <Tile
               label="Realized vol"
               value={m ? fmtPct(m.ann_vol) : DASH}
-              bench={showBenchmark && b ? `B&H ${fmtPct(b.ann_vol)}` : undefined}
-              title="ann_vol of the selected segment"
+              bench={showBenchmark && b ? `${bench.tag} ${fmtPct(b.ann_vol)}` : undefined}
+              title={
+                portfolio
+                  ? 'ann_vol of the selected segment: the whole portfolio, below the per-asset target when the legs diversify'
+                  : 'ann_vol of the selected segment'
+              }
             />
             <Tile
               label="Days at cap"
               value={fmtPct(sizing.pct_days_at_cap)}
-              sub="of invested days, full window"
-              title="Share of invested days held at max_leverage (warning above 25%)"
+              sub={portfolio ? 'of invested asset-days, full window' : 'of invested days, full window'}
+              title={
+                portfolio
+                  ? 'Share of invested asset-days on which a leg was held at max_leverage / N (warning above 25%)'
+                  : 'Share of invested days held at max_leverage (warning above 25%)'
+              }
               tone={sizing.pct_days_at_cap !== null && sizing.pct_days_at_cap > 0.25 ? 'warn' : undefined}
             />
           </Group>

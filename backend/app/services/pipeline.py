@@ -25,14 +25,17 @@ from app.services.monte_carlo import MonteCarloInputError
 from app.services.stats import PairsDiagnostics
 
 MARKET = "SPY"  # always loaded: the pairs benchmark and the beta reference (§4.5, §6.4)
-STRATEGIES = ("mean_reversion", "pairs", "trend")
+STRATEGIES = ("mean_reversion", "pairs", "trend", "trend_portfolio")
+TREND_STRATEGIES = ("trend", "trend_portfolio")  # no z_entry axis (§9)
 DEFAULT_L_GRID = {
     "mean_reversion": (20, 40, 60, 90, 120),
     "pairs": (20, 40, 60, 90, 120),
     "trend": (21, 63, 126, 252, 378),  # 1, 3, 6, 12 and 18 months
+    "trend_portfolio": (21, 63, 126, 252, 378),
 }
 DEFAULT_Z_ENTRY_GRID = (1.5, 2.0, 2.5, 3.0)
 MAX_GRID_VALUES = 8
+PORTFOLIO_LEGS = (2, 12)  # the trend portfolio's number of tickers (§5.8)
 
 
 @dataclass(frozen=True)
@@ -41,18 +44,21 @@ class StrategyParams:
 
     Units: L and vol_halflife in trading days; z thresholds in standard deviations; cost_bps
     one-way per leg in basis points; borrow_bps an annual fee on short notional in basis points;
-    vol_target annualized as a decimal; split_date is the requested split (None = the 70%
-    default). allow_short=False clips the signal at 0 (§5.9). Fields that don't apply to the
-    strategy are ignored.
+    vol_target annualized as a decimal (per asset for the trend portfolio, which needs one);
+    split_date is the requested split (None = the 70% default). allow_short=False clips the
+    signal at 0 (§5.9). pairs_model picks the rolling-OLS (§5.3) or Kalman (§5.7) score, with
+    kalman_delta its state-noise parameter. Fields that don't apply to the strategy are ignored.
     """
 
-    strategy: Literal["mean_reversion", "pairs", "trend"]
+    strategy: Literal["mean_reversion", "pairs", "trend", "trend_portfolio"]
     tickers: tuple[str, ...]
     L: int
     z_entry: float | None = 2.0
     z_exit: float | None = 0.5
     signal_frequency: Literal["monthly", "daily"] = "monthly"
     hedge_mode: Literal["fixed_at_entry", "rolling"] = "fixed_at_entry"
+    pairs_model: Literal["ols", "kalman"] = "ols"
+    kalman_delta: float = 1e-6
     cost_bps: float = 10.0
     execution_lag: int = 1
     borrow_bps: float = 0.0
@@ -68,18 +74,31 @@ class StrategyParams:
         object.__setattr__(self, "tickers", tuple(self.tickers))
         if self.strategy not in STRATEGIES:
             raise ValueError(f"unknown strategy {self.strategy!r}")
-        n_legs = 2 if self.strategy == "pairs" else 1
-        if len(self.tickers) != n_legs or len(set(self.tickers)) != n_legs:
-            raise ValueError(f"{self.strategy} needs {n_legs} distinct ticker(s), got {self.tickers}")
+        n_distinct = len(set(self.tickers))
+        if self.strategy == "trend_portfolio":
+            lo, hi = PORTFOLIO_LEGS
+            if not lo <= len(self.tickers) <= hi or n_distinct != len(self.tickers):
+                raise ValueError(f"trend_portfolio needs {lo} to {hi} distinct tickers, got {self.tickers}")
+            if self.vol_target is None:
+                raise ValueError("trend_portfolio is always vol-scaled per asset, so it needs a vol_target")
+        else:
+            n_legs = 2 if self.strategy == "pairs" else 1
+            if len(self.tickers) != n_legs or n_distinct != n_legs:
+                raise ValueError(f"{self.strategy} needs {n_legs} distinct ticker(s), got {self.tickers}")
         if self.L < 2:
             raise ValueError(f"L must be >= 2, got {self.L}")
-        if self.strategy == "trend":
+        if self.strategy in TREND_STRATEGIES:
             if self.signal_frequency not in ("monthly", "daily"):
                 raise ValueError(f"unknown signal_frequency {self.signal_frequency!r}")
         elif self.z_entry is None or self.z_exit is None or not 0 <= self.z_exit < self.z_entry:
             raise ValueError(f"need 0 <= z_exit < z_entry, got z_exit={self.z_exit}, z_entry={self.z_entry}")
-        if self.strategy == "pairs" and self.hedge_mode not in ("fixed_at_entry", "rolling"):
-            raise ValueError(f"unknown hedge_mode {self.hedge_mode!r}")
+        if self.strategy == "pairs":
+            if self.hedge_mode not in ("fixed_at_entry", "rolling"):
+                raise ValueError(f"unknown hedge_mode {self.hedge_mode!r}")
+            if self.pairs_model not in ("ols", "kalman"):
+                raise ValueError(f"unknown pairs_model {self.pairs_model!r}")
+            if self.pairs_model == "kalman" and (not 0 <= self.kalman_delta < 1 or self.L < 3):
+                raise ValueError("the Kalman model needs 0 <= kalman_delta < 1 and L >= 3")
         if not 0 <= self.execution_lag <= 5:
             raise ValueError(f"execution_lag must be in 0..5, got {self.execution_lag}")
         if not self.cost_bps >= 0:
@@ -101,26 +120,34 @@ class StrategyParams:
 class StrategyRun:
     """Everything the §5.0 steps produce.
 
-    Strategy outputs (score, signal, weights, beta, vol_forecast, scale_used) are unlagged:
-    the value at date t uses data through the close of t. The backtest holds the executed,
-    lagged series and the evaluation window.
+    Strategy outputs (score, signal, weights, beta, vol_forecast, scale_used and the leg_*
+    frames) are unlagged: the value at date t uses data through the close of t. The backtest
+    holds the executed, lagged series and the evaluation window.
+
+    For the trend portfolio (§5.8) score, vol_forecast and scale_used are None; each leg's are in
+    leg_scores, leg_signals, leg_vol_forecasts and leg_scale_used (one column per ticker), and
+    signal is the "invested" flag, 1 where any leg's signal is non-zero.
     """
 
     params: StrategyParams
     prices: pd.DataFrame  # adjusted closes of the legs and SPY on the run calendar
     rf: pd.Series
     returns: pd.DataFrame  # simple daily returns of the same columns (first row NaN)
-    score: pd.Series  # reported score: masked z (A, B) or masked, sampled m (C)
+    score: pd.Series | None  # reported score: masked z (A, B) or masked, sampled m (C); None for D
     signal: pd.Series
     unit_weights: pd.DataFrame
     weights: pd.DataFrame  # W: sized target weights (the unit weights when the overlay is off)
-    beta: pd.Series | None  # pairs: rolling beta
+    beta: pd.Series | None  # pairs: rolling (or filtered, with the Kalman model) beta
     beta_used: pd.Series | None  # pairs: the hedge ratio held
     vol_forecast: pd.Series | None  # overlay: annualized sigma
     scale_used: pd.Series | None  # overlay: the scale applied
     t0: int
     split_date: pd.Timestamp
     backtest: BacktestResult
+    leg_scores: pd.DataFrame | None = None  # trend portfolio: each leg's masked, sampled m
+    leg_signals: pd.DataFrame | None = None
+    leg_vol_forecasts: pd.DataFrame | None = None
+    leg_scale_used: pd.DataFrame | None = None
 
 
 def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) -> StrategyRun:
@@ -143,14 +170,19 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
     legs = list(p.tickers)
     prices = prices[cols]
     returns = prices / prices.shift(1) - 1  # §2.1 simple returns; no pct_change
+    if p.strategy == "trend_portfolio":
+        return _run_trend_portfolio(prices, rf, returns, p)
     overlay = p.vol_target is not None
 
-    # 1. Raw score.
+    # 1. Raw score: the rolling-OLS (§5.3) or Kalman (§5.7) z and beta for pairs.
     beta = None
     if p.strategy == "mean_reversion":
         score = strategies.mean_reversion_score(prices[legs[0]], p.L)
     elif p.strategy == "pairs":
-        pair = strategies.pairs_score(prices[legs[0]], prices[legs[1]], p.L)
+        if p.pairs_model == "kalman":
+            pair = strategies.kalman_pairs_score(prices[legs[0]], prices[legs[1]], p.L, p.kalman_delta)
+        else:
+            pair = strategies.pairs_score(prices[legs[0]], prices[legs[1]], p.L)
         score, beta = pair.z, pair.beta
     else:
         score = strategies.trend_score(prices[legs[0]], rf, p.L)
@@ -236,6 +268,90 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
     )
 
 
+def _run_trend_portfolio(
+    prices: pd.DataFrame, rf: pd.Series, returns: pd.DataFrame, p: StrategyParams
+) -> StrategyRun:
+    """Strategy D (§5.8): the §5.0 steps per asset, then one backtest with per-leg trades (§7.4).
+
+    Per leg i: m_i (§5.5); sigma_i from the leg's own return, masking m_i where it is undefined
+    (§5.6); sampling and sign give s_i, clipped by the long-only switch (§5.9). t0 is the first
+    date on which every leg's score is valid, and every s_i is 0 before it. The unit weight is
+    s_i / N and the sized weight w_i = s_i * scale_used_i / N, where scale_used_i follows §5.6's
+    refresh rule with the leg's own signal; it is exactly 0 where s_i = 0. Each leg is at most
+    max_leverage / N, so the gross exposure never exceeds max_leverage.
+    """
+    legs = list(p.tickers)
+    n_legs = len(legs)
+    scores, signals, sigmas = {}, {}, {}
+    for leg in legs:
+        m = strategies.trend_score(prices[leg], rf, p.L)  # 1. raw score
+        sigma, m = sizing.forecast_and_mask(returns[leg], m, p.vol_halflife)  # 2. forecast, mask
+        score, signal = strategies.trend_signal(m, p.signal_frequency)  # 3. sampling and sign
+        if not p.allow_short:
+            signal = strategies.long_only(signal)
+        scores[leg], signals[leg], sigmas[leg] = score, signal, sigma
+    leg_scores = pd.DataFrame(scores, index=prices.index)
+    valid = leg_scores.notna().all(axis=1).to_numpy()
+    if not valid.any():
+        raise NoValidScoreError(
+            f"The trend_portfolio score is undefined on every day: the date range is too short for "
+            f"L = {p.L} and the volatility half-life."
+        )
+    t0 = int(np.argmax(valid))  # the first date on which every leg's score is valid
+    leg_signals = pd.DataFrame(signals, index=prices.index)
+    leg_signals.iloc[:t0] = 0.0  # the portfolio starts with all its legs
+
+    # 4-5. Unit weights s_i / N; sized weights s_i * scale_used_i / N, each leg with its own refresh.
+    unit_weights = leg_signals / n_legs
+    vol_forecasts = pd.DataFrame(sigmas, index=prices.index)
+    W, scale_used = sizing.size_portfolio(
+        leg_signals,
+        vol_forecasts,
+        vol_target=p.vol_target,
+        max_leverage=p.max_leverage,
+        vol_refresh=p.vol_refresh,
+    )
+    invested = leg_signals.ne(0).any(axis=1).astype(float).rename("signal")
+
+    # 6. Evaluation.
+    k = p.execution_lag
+    split = backtester.resolve_split(prices.index[t0 + k :], p.split_date)
+    bt = backtester.run_backtest(
+        R=returns[legs],
+        W=W,
+        s=invested,
+        rf=rf,
+        t0=t0,
+        k=k,
+        cost_bps=p.cost_bps,
+        borrow_bps=p.borrow_bps,
+        E0=p.initial_capital,
+        split_date=split,
+        leg_signals=leg_signals,
+    )
+    return StrategyRun(
+        params=p,
+        prices=prices,
+        rf=rf,
+        returns=returns,
+        score=None,
+        signal=invested,
+        unit_weights=unit_weights,
+        weights=W,
+        beta=None,
+        beta_used=None,
+        vol_forecast=None,
+        scale_used=None,
+        t0=t0,
+        split_date=bt.split_date,
+        backtest=bt,
+        leg_scores=leg_scores,
+        leg_signals=leg_signals,
+        leg_vol_forecasts=vol_forecasts,
+        leg_scale_used=scale_used,
+    )
+
+
 def _check_inputs(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) -> list[str]:
     """Assert the §2.1 index contract where data enters the core; return the columns used."""
     if not isinstance(rf, pd.Series):
@@ -277,9 +393,12 @@ class BacktestReport:
 
     series: one row per date from s0 = min(t0, e - 1) to the last evaluated day, NaN where the
         API sends null. Columns: equity, benchmark_equity, drawdown, daily_return, position,
-        gross_exposure, score, beta and beta_used (pairs only), vol_forecast (overlay only),
-        is_oos, rolling_sharpe and rolling_beta.
-    trades: the §7.3 trade records plus beta_at_entry (NaN unless pairs).
+        gross_exposure, score (not for the trend portfolio), beta and beta_used (pairs only),
+        vol_forecast (overlay only, not for the trend portfolio), is_oos, rolling_sharpe and
+        rolling_beta.
+    legs: trend portfolio only, one frame per ticker on the series index, with the leg's score
+        and vol_forecast (unlagged) and its executed position and weight. None otherwise.
+    trades: the §7.3 trade records plus ticker (§7.4) and beta_at_entry (NaN unless pairs).
     metrics, benchmark_metrics: keyed "is", "oos" and "full"; "oos" is None if ruin hit in IS.
     cost_sensitivity: the §8.1 cost sweep; None when the run was ruined.
     calendar_monthly, calendar_annual: §8.2 calendar returns of the evaluation window.
@@ -288,6 +407,7 @@ class BacktestReport:
     split_date: pd.Timestamp
     first_evaluated_date: pd.Timestamp
     series: pd.DataFrame
+    legs: dict[str, pd.DataFrame] | None
     sizing: SizingSummary | None
     trades: pd.DataFrame
     metrics: dict[str, Metrics | None]
@@ -321,7 +441,7 @@ def build_report(
     legs = list(p.tickers)
     pairs = p.strategy == "pairs"
     market_excess = run.returns[MARKET] - run.rf  # SPY excess return, for beta and correlation
-    bench = run.returns[MARKET if pairs else legs[0]]  # §6.4
+    bench = benchmark_returns(run.returns, p)
 
     trades = bt.trades.copy()
     if pairs:
@@ -340,7 +460,7 @@ def build_report(
             total=bt.total.iloc[sl],
             excess=bt.excess.iloc[sl],
             market_excess=market_excess.iloc[sl],
-            held=bt.held_id.iloc[sl].notna(),
+            held=bt.held.iloc[sl],
             gross_held=bt.gross_held.iloc[sl],
             turnover=bt.turnover.iloc[sl],
             cost=bt.cost.iloc[sl],
@@ -352,9 +472,16 @@ def build_report(
         )
 
     sizing_summary = None
-    if p.vol_target is not None:
+    if p.vol_target is not None:  # always, for the trend portfolio
         win = slice(bt.e, bt.stop)
-        pct = metrics.pct_days_at_cap(bt.gross_held.iloc[win], bt.held_id.iloc[win].notna(), p.max_leverage)
+        if p.strategy == "trend_portfolio":  # invested asset-days against the per-leg cap (§5.8)
+            pct = metrics.pct_days_at_cap(
+                bt.w.shift(1).fillna(0.0).abs().iloc[win],
+                bt.held_id.iloc[win].notna(),
+                p.max_leverage / len(legs),
+            )
+        else:
+            pct = metrics.pct_days_at_cap(bt.gross_held.iloc[win], bt.held.iloc[win], p.max_leverage)
         sizing_summary = SizingSummary(
             vol_target=p.vol_target, max_leverage=p.max_leverage, pct_days_at_cap=pct
         )
@@ -370,7 +497,7 @@ def build_report(
             borrow=bt.borrow,
             turnover=bt.turnover,
             rf=run.rf,
-            held=bt.held_id.notna(),
+            held=bt.held,
             segments=bt.segment_bounds(),
             e=bt.e,
             cost_bps=p.cost_bps,
@@ -397,11 +524,14 @@ def build_report(
         collinear_oos=diagnostics is not None and diagnostics.collinear_oos,
         break_even_full_bps=None if cost_sensitivity is None else cost_sensitivity.break_even_bps["full"],
         cost_bps=p.cost_bps,
+        per_leg_cap=p.strategy == "trend_portfolio",
     )
+    series = _series(run, bench, market_excess)
     return BacktestReport(
         split_date=bt.split_date,
         first_evaluated_date=run.prices.index[bt.e],
-        series=_series(run, bench, market_excess),
+        series=series,
+        legs=_leg_series(run, series.index),
         sizing=sizing_summary,
         trades=trades,
         metrics=seg_metrics,
@@ -434,8 +564,9 @@ def _series(run: StrategyRun, bench: pd.Series, market_excess: pd.Series) -> pd.
         "daily_return": bt.total.iloc[s0:stop].where(after_base),  # NaN up to and including the baseline
         "position": bt.pos.iloc[s0:stop],
         "gross_exposure": bt.w.abs().sum(axis=1).iloc[s0:stop],  # executed, at the end of each day
-        "score": run.score.iloc[s0:stop],
     }
+    if run.score is not None:  # the trend portfolio's scores are per leg (_leg_series)
+        cols["score"] = run.score.iloc[s0:stop]
     if run.beta is not None:
         cols["beta"] = run.beta.iloc[s0:stop]
         cols["beta_used"] = run.beta_used.iloc[s0:stop]
@@ -445,12 +576,42 @@ def _series(run: StrategyRun, bench: pd.Series, market_excess: pd.Series) -> pd.
     # §8.2: trailing 252 evaluated days, NaN before the 252nd and outside the evaluation window.
     win = slice(bt.e, stop)
     roll_sharpe, roll_beta = metrics.rolling_sharpe_beta(
-        bt.excess.iloc[win], market_excess.iloc[win], bt.held_id.iloc[win].notna()
+        bt.excess.iloc[win], market_excess.iloc[win], bt.held.iloc[win]
     )
     before = np.full(bt.e - s0, np.nan)
     cols["rolling_sharpe"] = np.concatenate([before, roll_sharpe])
     cols["rolling_beta"] = np.concatenate([before, roll_beta])
     return pd.DataFrame(cols, index=idx)
+
+
+def _leg_series(run: StrategyRun, index: pd.DatetimeIndex) -> dict[str, pd.DataFrame] | None:
+    """Trend portfolio: each leg's score and vol forecast (unlagged), and its executed position
+    and weight, on the chart series' dates. None for the other strategies."""
+    if run.leg_scores is None:
+        return None
+    bt = run.backtest
+    return {
+        leg: pd.DataFrame(
+            {
+                "score": run.leg_scores[leg],
+                "position": bt.leg_pos[leg],
+                "weight": bt.w[leg],
+                "vol_forecast": run.leg_vol_forecasts[leg],
+            }
+        ).reindex(index)
+        for leg in run.params.tickers
+    }
+
+
+def benchmark_returns(returns: pd.DataFrame, params: StrategyParams) -> pd.Series:
+    """The benchmark's daily total return (§6.4): buy-and-hold of the traded ticker (A, C), of SPY
+    (pairs), or an equal-weight, daily-rebalanced, long-only basket of the legs (trend portfolio).
+    No costs, no cash, never vol-targeted."""
+    if params.strategy == "pairs":
+        return returns[MARKET]
+    if params.strategy == "trend_portfolio":
+        return returns[list(params.tickers)].mean(axis=1).rename("basket")
+    return returns[params.tickers[0]]
 
 
 # ---------------------------------------------------------------- sensitivity (§9)
@@ -522,7 +683,7 @@ def run_sensitivity(
         InsufficientDataError: a configuration leaves too short a window or has no valid
             score; the message names the culprit L.
     """
-    trend = params.strategy == "trend"
+    trend = params.strategy in TREND_STRATEGIES
     Ls, zs = grid_axes(params, L_values, z_entry_values)
     split = run_strategy(prices, rf, params).split_date  # 1. exactly as /api/backtest resolves it
     # 2. Every configuration with its own t0 and the common split.
@@ -558,12 +719,13 @@ def grid_axes(
 ) -> tuple[tuple[int, ...], tuple[float, ...] | None]:
     """The §9 grid axes: the defaults for the strategy, or the request's overrides.
 
-    Trend has no z_entry axis, so its z_entry_values are ignored and None is returned for them.
+    Trend and the trend portfolio have no z_entry axis, so their z_entry_values are ignored and
+    None is returned for them.
 
     Raises:
         ValueError: an axis has no values or more than 8, or a z_entry is not above z_exit.
     """
-    trend = params.strategy == "trend"
+    trend = params.strategy in TREND_STRATEGIES
     Ls = tuple(L_values) if L_values is not None else DEFAULT_L_GRID[params.strategy]
     zs = None if trend else tuple(z_entry_values) if z_entry_values is not None else DEFAULT_Z_ENTRY_GRID
     if not 1 <= len(Ls) <= MAX_GRID_VALUES or (zs is not None and not 1 <= len(zs) <= MAX_GRID_VALUES):
@@ -629,7 +791,7 @@ def _window_excess(bt: BacktestResult, start: int, end: int) -> WindowExcess:
     if stop <= start:
         return None
     sl = slice(start, stop)
-    return bt.excess.iloc[sl].to_numpy(), bool(bt.held_id.iloc[sl].notna().any())
+    return bt.excess.iloc[sl].to_numpy(), bool(bt.held.iloc[sl].any())
 
 
 def _cell_sharpe(window: WindowExcess) -> float | None:
@@ -813,7 +975,7 @@ def run_walk_forward(
 
     # 3. Selection, causal: fold j looks at returns through the close of b_j - 1 only.
     excess = {cell: run.backtest.excess.to_numpy() for cell, run in runs.items()}
-    held = {cell: run.backtest.held_id.notna().to_numpy() for cell, run in runs.items()}
+    held = {cell: run.backtest.held.to_numpy() for cell, run in runs.items()}
     chosen = [select_configuration(runs, excess, held, fw.train_start, fw.test_start) for fw in windows]
 
     # 4. Stitching: fold j rules the executed weights at the closes [b_j - 1, b_{j+1} - 1).
@@ -873,7 +1035,7 @@ def run_walk_forward(
     )
     fixed_stop = min(stop, own.backtest.stop)  # the request's own run ends at its ruin day, if any
     fixed_metrics = _fixed_metrics(own, e, fixed_stop, market_excess) if fixed_stop > e else None
-    bench = own.returns[MARKET if params.strategy == "pairs" else legs[0]]  # §6.4
+    bench = benchmark_returns(own.returns, params)  # §6.4
     bench_metrics = metrics.benchmark_metrics(
         r=bench.iloc[win], rf=rf.iloc[win], market_excess=market_excess.iloc[win]
     )
@@ -962,7 +1124,7 @@ def _fixed_metrics(run: StrategyRun, start: int, stop: int, market_excess: pd.Se
         total=bt.total.iloc[sl],
         excess=bt.excess.iloc[sl],
         market_excess=market_excess.iloc[sl],
-        held=bt.held_id.iloc[sl].notna(),
+        held=bt.held.iloc[sl],
         gross_held=bt.gross_held.iloc[sl],
         turnover=bt.turnover.iloc[sl],
         cost=bt.cost.iloc[sl],
@@ -1000,7 +1162,7 @@ def strategy_mc_returns(run: StrategyRun, window: Literal["full", "is"]) -> tupl
             f"The {label} window contains the ruin day {bt.ruin_date:%Y-%m-%d}, where ln(1 + R) is undefined."
         )
     sl = slice(bt.e, end)
-    return bt.total.iloc[sl].to_numpy(), bool(bt.held_id.iloc[sl].notna().any())
+    return bt.total.iloc[sl].to_numpy(), bool(bt.held.iloc[sl].any())
 
 
 def ticker_returns(close: pd.Series) -> np.ndarray:

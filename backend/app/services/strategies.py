@@ -1,4 +1,4 @@
-"""Scores, entry/exit rules and unit weights for strategies A, B and C (§5.1-§5.5).
+"""Scores, entry/exit rules and unit weights for strategies A-D (§5.1-§5.5, §5.7-§5.8).
 
 Pure (§0, rule 8). Every function takes pandas objects indexed by the run calendar and returns
 new ones on the same index. A score or signal "at date t" uses data up to and including the
@@ -13,6 +13,8 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+from app.services import stats
 
 # §5.2/§5.3: a rolling variance of rebased log prices at or below this is a degenerate window.
 VAR_FLOOR = 1e-12
@@ -114,6 +116,27 @@ def pairs_score(y_close: pd.Series, x_close: pd.Series, L: int) -> PairsScore:
     spread = (y - my) - beta * (x - mx)  # OLS residual of today's point
     z = spread / np.sqrt(resid_var.where(resid_var > RESID_VAR_RATIO * vy))
     return PairsScore(z=z.rename("z"), beta=beta.rename("beta"))
+
+
+def kalman_pairs_score(y_close: pd.Series, x_close: pd.Series, L: int, delta: float) -> PairsScore:
+    """Kalman-filter score and hedge ratio of Y (= tickers[0]) on X (= tickers[1]) (§5.7).
+
+    Replaces pairs_score in step 1 of §5.0 when pairs_model="kalman"; everything downstream is
+    unchanged. On the rebased log prices of §5.3, the state (alpha_t, beta_t) is a random walk
+    with q = delta / (1 - delta), seeded by the OLS fit on days 0..L-1.
+
+    Returns:
+        PairsScore. z is the filter's standardized innovation: its prediction uses data through
+        t - 1, and it is N(0, 1) under the model. beta is the filtered hedge ratio, using closes
+        through t. Both are NaN for t < L, and everywhere when the warm-up window has a flat X or
+        exactly collinear legs.
+    """
+    y, x = np.log(y_close / y_close.iloc[0]), np.log(x_close / x_close.iloc[0])  # rebased logs
+    kf = stats.kalman_filter(y.to_numpy(), x.to_numpy(), L, delta)
+    index = y_close.index
+    return PairsScore(
+        z=pd.Series(kf.z, index=index, name="z"), beta=pd.Series(kf.beta, index=index, name="beta")
+    )
 
 
 def hedge_ratio_used(

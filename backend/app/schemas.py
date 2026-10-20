@@ -18,26 +18,36 @@ from app.services.pipeline import StrategyParams
 
 TICKER = re.compile(r"^[A-Z0-9.^=-]{1,15}$")
 EARLIEST_START = dt.date(1990, 1, 1)
-L_RANGE = {"mean_reversion": (10, 252), "pairs": (10, 252), "trend": (21, 504)}
-L_DEFAULT = {"mean_reversion": 60, "pairs": 60, "trend": 252}
+L_RANGE = {"mean_reversion": (10, 252), "pairs": (10, 252), "trend": (21, 504), "trend_portfolio": (21, 504)}
+L_DEFAULT = {"mean_reversion": 60, "pairs": 60, "trend": 252, "trend_portfolio": 252}
+PORTFOLIO_LEGS = (2, 12)  # distinct tickers in a trend portfolio (§5.8)
+VOL_TARGET_RANGE = (0.01, 0.5)  # annualized, for the optional overlay (§5.6)
+PORTFOLIO_VOL_TARGET_RANGE = (0.05, 0.6)  # per asset, for the trend portfolio (§5.8)
+PORTFOLIO_VOL_TARGET_DEFAULT = 0.40
 MAX_GRID_VALUES = 8
 MAX_PATH_CELLS = 12_700_000  # n_paths * (horizon + 1); keeps Monte Carlo near 200 MB
 MAX_SEED = 2**53  # JavaScript loses integer precision above this
 
-Strategy = Literal["mean_reversion", "pairs", "trend"]
+Strategy = Literal["mean_reversion", "pairs", "trend", "trend_portfolio"]
 RiskFree = Literal["tbill"] | Annotated[float, Field(ge=-0.01, le=0.25)]
+BlockLen = Literal["auto"] | Annotated[int, Field(ge=1, le=63)]
 
 
-def _not_applicable(strategy: object, vol_target: object) -> set[str]:
-    """BacktestRequest fields that the strategy, or a missing vol_target, makes irrelevant."""
+def _not_applicable(strategy: object, vol_target: object, pairs_model: object) -> set[str]:
+    """BacktestRequest fields that the strategy, the pairs model or a missing vol_target makes
+    irrelevant. The trend portfolio's vol settings always apply: its vol_target resolves to 0.40."""
     fields: set[str] = set()
-    if strategy == "trend":
+    if strategy in ("trend", "trend_portfolio"):
         fields |= {"z_entry", "z_exit", "hedge_mode"}
     if strategy in ("mean_reversion", "pairs"):
         fields.add("signal_frequency")
     if strategy == "mean_reversion":
         fields.add("hedge_mode")
-    if vol_target is None:
+    if strategy != "pairs":
+        fields |= {"pairs_model", "kalman_delta"}
+    elif pairs_model != "kalman":
+        fields.add("kalman_delta")
+    if vol_target is None and strategy != "trend_portfolio":
         fields |= {"vol_halflife", "vol_refresh", "max_leverage"}
     return fields
 
@@ -80,7 +90,9 @@ class BacktestRequest(BaseModel):
     start: dt.date
     end: dt.date
     L: int | None = Field(
-        None, description="Lookback in trading days; null -> 60 (mean_reversion, pairs) or 252 (trend)"
+        None,
+        description="Lookback in trading days; null -> 60 (mean_reversion, pairs) "
+        "or 252 (trend, trend_portfolio)",
     )
     z_entry: float = Field(2.0, gt=0, le=5)
     z_exit: float = Field(0.5, ge=0)
@@ -88,10 +100,18 @@ class BacktestRequest(BaseModel):
     cost_bps: float = Field(10.0, ge=0, le=100, description="One-way cost per leg, basis points")
     execution_lag: int = Field(1, ge=0, le=5)
     hedge_mode: Literal["fixed_at_entry", "rolling"] = "fixed_at_entry"
+    pairs_model: Literal["ols", "kalman"] = Field(
+        "ols", description="Pairs only: rolling OLS or Kalman filter"
+    )
+    kalman_delta: float = Field(
+        1e-6, ge=1e-7, le=1e-2, description="Kalman state noise; pairs_model='kalman' only"
+    )
     borrow_bps: float = Field(0.0, ge=0, le=2000, description="Annual fee on short notional, basis points")
     allow_short: bool = Field(True, description="false clips the signal at 0 (long or flat); not for pairs")
     vol_target: float | None = Field(
-        None, ge=0.01, le=0.5, description="Annualized; null turns the overlay off"
+        None,
+        description="Annualized; null turns the overlay off. 0.01-0.5, or 0.05-0.6 per asset for "
+        "trend_portfolio, where null -> 0.40",
     )
     vol_halflife: int = Field(42, ge=5, le=126)
     vol_refresh: Literal["daily", "weekly", "monthly"] = "weekly"
@@ -102,7 +122,7 @@ class BacktestRequest(BaseModel):
 
     @classmethod
     def _ignored(cls, data: dict[str, Any]) -> set[str]:
-        return _not_applicable(data.get("strategy"), data.get("vol_target"))
+        return _not_applicable(data.get("strategy"), data.get("vol_target"), data.get("pairs_model", "ols"))
 
     @model_validator(mode="before")
     @classmethod
@@ -125,20 +145,37 @@ class BacktestRequest(BaseModel):
         return self
 
     def _resolve_common(self) -> None:
-        n_legs = 2 if self.strategy == "pairs" else 1
-        if len(self.tickers) != n_legs:
-            raise ValueError(f"{self.strategy} needs exactly {n_legs} ticker(s), got {len(self.tickers)}")
+        if self.strategy == "trend_portfolio":
+            lo, hi = PORTFOLIO_LEGS
+            if not lo <= len(self.tickers) <= hi:
+                raise ValueError(f"trend_portfolio needs {lo} to {hi} tickers, got {len(self.tickers)}")
+        else:
+            n_legs = 2 if self.strategy == "pairs" else 1
+            if len(self.tickers) != n_legs:
+                raise ValueError(f"{self.strategy} needs exactly {n_legs} ticker(s), got {len(self.tickers)}")
         for ticker in self.tickers:
             _check_ticker(ticker)
-        if n_legs == 2 and self.tickers[0] == self.tickers[1]:
-            raise ValueError("pairs needs two distinct tickers")
+        if len(set(self.tickers)) != len(self.tickers):
+            raise ValueError(
+                "pairs needs two distinct tickers"
+                if self.strategy == "pairs"
+                else f"{self.strategy} needs distinct tickers"
+            )
+        if self.strategy == "trend_portfolio" and self.vol_target is None:
+            self.vol_target = PORTFOLIO_VOL_TARGET_DEFAULT  # the overlay is always on (§5.8)
+        if self.vol_target is not None:
+            portfolio = self.strategy == "trend_portfolio"
+            lo, hi = PORTFOLIO_VOL_TARGET_RANGE if portfolio else VOL_TARGET_RANGE
+            if not lo <= self.vol_target <= hi:
+                where = " per asset for trend_portfolio" if portfolio else ""
+                raise ValueError(f"vol_target must be between {lo} and {hi}{where}, got {self.vol_target}")
         self.end = _check_dates(self.start, self.end)
         lo, hi = L_RANGE[self.strategy]
         if self.L is None:
             self.L = L_DEFAULT[self.strategy]
         elif not lo <= self.L <= hi:
             raise ValueError(f"L must be between {lo} and {hi} for {self.strategy}, got {self.L}")
-        if self.strategy != "trend" and not self.z_exit < self.z_entry:
+        if self.strategy in ("mean_reversion", "pairs") and not self.z_exit < self.z_entry:
             raise ValueError(f"z_exit ({self.z_exit}) must be less than z_entry ({self.z_entry})")
         if self.strategy == "pairs" and not self.allow_short:
             raise ValueError("pairs needs a short leg, so allow_short=false is not available")
@@ -146,7 +183,7 @@ class BacktestRequest(BaseModel):
     def resolved(self) -> dict[str, Any]:
         """The request with every default filled in, end clamped and non-applicable fields null."""
         out = self.model_dump(mode="json", include=set(BacktestRequest.model_fields))
-        for key in _not_applicable(self.strategy, self.vol_target):
+        for key in _not_applicable(self.strategy, self.vol_target, self.pairs_model):
             out[key] = None
         return out
 
@@ -164,6 +201,8 @@ class BacktestRequest(BaseModel):
             z_exit=self.z_exit,
             signal_frequency=self.signal_frequency,
             hedge_mode=self.hedge_mode,
+            pairs_model=self.pairs_model,
+            kalman_delta=self.kalman_delta,
             cost_bps=self.cost_bps,
             execution_lag=self.execution_lag,
             borrow_bps=self.borrow_bps,
@@ -186,8 +225,8 @@ class SensitivityRequest(BacktestRequest):
     @classmethod
     def _ignored(cls, data: dict[str, Any]) -> set[str]:
         ignored = super()._ignored(data)
-        if data.get("strategy") == "trend":
-            ignored.add("z_entry_values")  # trend has no z_entry axis
+        if data.get("strategy") in ("trend", "trend_portfolio"):
+            ignored.add("z_entry_values")  # no z_entry axis
         return ignored
 
     @model_validator(mode="after")
@@ -240,7 +279,9 @@ class MonteCarloRequest(BaseModel):
     end: dt.date | None = None
     n_paths: int = Field(10_000, ge=1_000, le=50_000)
     horizon: int = Field(252, ge=5, le=504, description="Trading days")
-    block_len: int = Field(10, ge=1, le=63)
+    block_len: BlockLen = Field(
+        10, description="Days, 1-63, or 'auto' (§10.8); the mean block length for the stationary bootstrap"
+    )
     seed: int | None = Field(None, ge=0, lt=MAX_SEED)
     zero_drift: bool = False
 
@@ -330,6 +371,18 @@ class TradeOut(BaseModel):
     holding_days: int
     pnl: float
     beta_at_entry: float | None
+    ticker: str | None  # the leg, for trend_portfolio only (§7.4)
+
+
+class LegSeriesOut(BaseModel):
+    """One trend-portfolio leg on the series dates: score and vol forecast as of each close,
+    executed position and weight."""
+
+    ticker: str
+    score: list[float | None]
+    position: list[float]
+    weight: list[float]
+    vol_forecast: list[float | None]
 
 
 class SeriesOut(BaseModel):
@@ -340,15 +393,16 @@ class SeriesOut(BaseModel):
     benchmark_equity: list[float | None]
     drawdown: list[float | None]
     daily_return: list[float | None]  # daily total return; null up to and including the baseline
-    position: list[float]  # executed position
+    position: list[float]  # executed position (trend_portfolio: 1 when any leg is held)
     gross_exposure: list[float]  # executed sum of |w| at the end of each day
-    score: list[float | None]
-    beta: list[float | None] | None  # pairs only
+    score: list[float | None] | None  # null for trend_portfolio, whose scores are in legs
+    beta: list[float | None] | None  # pairs only (the filtered beta with pairs_model="kalman")
     beta_used: list[float | None] | None  # pairs only
-    vol_forecast: list[float | None] | None  # null when the overlay is off
+    vol_forecast: list[float | None] | None  # null when the overlay is off, and for trend_portfolio
     is_oos: list[bool]
     rolling_sharpe: list[float | None]  # trailing 252 evaluated days (§8.2)
     rolling_beta: list[float | None]
+    legs: list[LegSeriesOut] | None  # trend_portfolio only
 
 
 class SizingOut(BaseModel):
@@ -377,6 +431,8 @@ class ResolvedBacktestRequest(BaseModel):
     cost_bps: float
     execution_lag: int
     hedge_mode: Literal["fixed_at_entry", "rolling"] | None
+    pairs_model: Literal["ols", "kalman"] | None
+    kalman_delta: float | None
     borrow_bps: float
     allow_short: bool
     vol_target: float | None
@@ -479,8 +535,8 @@ class DeflatedOut(BaseModel):
 
 class SensitivityResponse(BaseModel):
     L_values: list[int]
-    z_entry_values: list[float] | None  # null for trend
-    sharpe: list[list[float | None]]  # rows = L; one column for trend
+    z_entry_values: list[float] | None  # null for trend and trend_portfolio
+    sharpe: list[list[float | None]]  # rows = L; one column for trend and trend_portfolio
     n_configs_tested: int
     window: WindowOut
     selected: SelectedCellOut | None
@@ -492,7 +548,7 @@ class ResolvedWalkForwardRun(ResolvedBacktestRequest):
     test_days: int
     anchored: bool
     L_values: list[int]  # the grid actually used
-    z_entry_values: list[float] | None  # null for trend
+    z_entry_values: list[float] | None  # null for trend and trend_portfolio
 
 
 class FoldOut(BaseModel):
@@ -557,6 +613,13 @@ class RiskOut(BaseModel):
     cvar99: float
 
 
+class BlockLenUsedOut(BaseModel):
+    """The block lengths actually used: the request's block_len, or the §10.8 estimates."""
+
+    circular: int
+    stationary: int  # the mean block length
+
+
 class ResolvedMonteCarloRun(BaseModel):
     source: Literal["strategy", "ticker"]
     backtest: ResolvedBacktestRequest | None
@@ -566,18 +629,20 @@ class ResolvedMonteCarloRun(BaseModel):
     end: str | None
     n_paths: int
     horizon: int
-    block_len: int
+    block_len: int | Literal["auto"]  # as requested
     seed: int
     zero_drift: bool
     n_hist: int
     mu_daily: float
     sigma_daily: float
+    block_len_used: BlockLenUsedOut
 
 
 class MonteCarloResponse(BaseModel):
     resolved: ResolvedMonteCarloRun
     gbm: ModelResultOut
     bootstrap: ModelResultOut
+    stationary: ModelResultOut  # §10.7
     closed_form_gbm: RiskOut
-    hist_edges: list[float]  # 51, shared by both models
+    hist_edges: list[float]  # 51, shared by the three models
     elapsed_ms_total: float

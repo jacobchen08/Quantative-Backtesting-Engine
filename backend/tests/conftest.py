@@ -48,6 +48,27 @@ def make_prices(n: int = N_DAYS, seed: int = SEED, start: str = START) -> pd.Dat
     return pd.DataFrame({"Y": np.exp(y), "X": np.exp(x), "SPY": np.exp(spy)}, index=idx)
 
 
+UNIVERSE_VOLS = {"T08": 0.08, "T15": 0.15, "T20": 0.20, "T30": 0.30}  # annual vol of each asset
+UNIVERSE_SEED = 20261018
+
+
+def make_universe(
+    index: pd.DatetimeIndex, seed: int = UNIVERSE_SEED, drift: float | None = None
+) -> pd.DataFrame:
+    """The trend-portfolio universe (§12): four assets with constant volatilities of 8%, 15%,
+    20% and 30% a year on the given calendar, from a fixed seed.
+
+    Log returns are iid normal. Each asset's daily drift is random (between -0.03% and +0.06%)
+    unless `drift` fixes it for all of them.
+    """
+    g = np.random.default_rng(seed)
+    out = {}
+    for ticker, vol in UNIVERSE_VOLS.items():
+        mu = float(g.uniform(-0.0003, 0.0006)) if drift is None else drift
+        out[ticker] = 50.0 * np.exp(np.cumsum(g.normal(mu, vol / np.sqrt(252), len(index))))
+    return pd.DataFrame(out, index=index)
+
+
 def constant_rf(index: pd.DatetimeIndex, percent: float = IRX_PERCENT) -> pd.Series:
     """The daily rate a constant ^IRX quote gives: percent / 100 / 252 on every day (§4.5)."""
     return pd.Series(percent / 100 / 252, index=index, name="rf")
@@ -84,10 +105,12 @@ def yf_layout(adj_close: pd.Series, close: pd.Series | None = None, seed: int = 
 
 
 _PRICES = make_prices()
+_UNIVERSE = make_universe(_PRICES.index)
 assert _PRICES.index[-1].date() < FROZEN_TODAY
 _IRX_DAYS = pd.bdate_range("2017-11-01", _PRICES.index[-1])  # covers the 14-day buffer before START
 YF_FRAMES = {
     **{ticker: yf_layout(_PRICES[ticker], seed=i) for i, ticker in enumerate(_PRICES.columns)},
+    **{ticker: yf_layout(_UNIVERSE[ticker], seed=10 + i) for i, ticker in enumerate(_UNIVERSE.columns)},
     "^IRX": yf_layout(pd.Series(IRX_PERCENT, index=_IRX_DAYS)),
 }
 
@@ -137,6 +160,18 @@ def frozen_today(monkeypatch: pytest.MonkeyPatch) -> dt.date:
 def prices() -> pd.DataFrame:
     """The 1,000-day fixture: adjusted closes of Y, X and SPY (a fresh copy per test)."""
     return _PRICES.copy()
+
+
+@pytest.fixture
+def portfolio_prices() -> pd.DataFrame:
+    """The 1,000-day fixture plus the four-asset trend-portfolio universe (T08, T15, T20, T30)."""
+    return _PRICES.join(_UNIVERSE)
+
+
+@pytest.fixture
+def universe() -> Callable[..., pd.DataFrame]:
+    """Factory for the trend-portfolio universe on another calendar, seed or drift."""
+    return make_universe
 
 
 @pytest.fixture

@@ -79,10 +79,15 @@ class BacktestResult:
 
     Returns and P&L are decimals and fractions of equity. The value at date t of every daily
     series is for the day ending at the close of t.
+
+    With per-leg trades (the trend portfolio, §7.4), trade_id and held_id are DataFrames with
+    one column per leg, holding the portfolio-wide trade ids, and leg_pos holds each leg's
+    executed position. Otherwise they are Series and leg_pos is None.
     """
 
     w: pd.DataFrame  # executed end-of-day weights, w_t = W_{t-k}
-    pos: pd.Series  # executed position, pos_t = s_{t-k}
+    pos: pd.Series  # executed position, pos_t = s_{t-k} (for per-leg trades: the invested flag)
+    held: pd.Series  # True when a position (any leg) is held into day t and earns its P&L
     gross_held: pd.Series  # sum_i |w_{i,t-1}|: gross exposure held into day t
     gross_excess: pd.Series  # sum_i w_{i,t-1} (r_{i,t} - rf_t), before costs and borrow fees
     borrow: pd.Series  # borrow fee on the short notional held into day t (§6.1)
@@ -90,10 +95,11 @@ class BacktestResult:
     cost: pd.Series  # c * turnover, charged on the trade day
     excess: pd.Series  # daily return in excess of rf; clipped on the ruin day
     total: pd.Series  # daily total return rf + excess; exactly -1 on the ruin day
-    trade_id: pd.Series  # trade whose executed position is held at the close of t (NaN = flat)
-    held_id: pd.Series  # trade that earns day t's P&L, i.e. trade_id shifted by one day
+    trade_id: pd.Series | pd.DataFrame  # trade whose executed position is held at the close of t (NaN = flat)
+    held_id: pd.Series | pd.DataFrame  # trade that earns day t's P&L, i.e. trade_id shifted by one day
+    leg_pos: pd.DataFrame | None  # per-leg trades only: each leg's executed position s_i shifted by k
     pnl: pd.Series  # P&L per trade id as a fraction of equity (§7.1), within the window
-    trades: pd.DataFrame  # one row per trade with the §7.3 fields (beta_at_entry is added later)
+    trades: pd.DataFrame  # one row per trade with the §7.3 fields and ticker (beta_at_entry is added later)
     equity: pd.Series  # baseline E0 dated e - 1, then E_t through stop - 1
     drawdown: pd.Series  # E_t / running max - 1, same index as equity
     t0: int
@@ -203,6 +209,7 @@ def run_backtest(
     borrow_bps: float,
     E0: float,
     split_date: date | pd.Timestamp,
+    leg_signals: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Daily returns, costs, borrow fees, equity, ruin and trades (§6.1, §6.2, §7).
 
@@ -219,6 +226,10 @@ def run_backtest(
             charged daily at borrow_bps / 10,000 / 252. 0 reproduces the earlier phases exactly.
         E0: initial equity (currency units).
         split_date: an already-resolved split date leaving >= 1 IS and >= 1 OOS evaluated day.
+        leg_signals: for the trend portfolio (§5.8, §7.4), each leg's raw signal, same index and
+            columns as R. Trades are then identified and attributed leg by leg, and s must be the
+            "invested" flag: 1 where any leg's signal is non-zero, else 0. None (the default) for
+            the other strategies, whose trades span all legs.
 
     Returns:
         BacktestResult. total_t = rf_t + sum_i w_{i,t-1} (r_{i,t} - rf_t) - borrow_t - cost_t,
@@ -232,6 +243,8 @@ def run_backtest(
         raise TypeError(f"rf must be a pandas Series on the run calendar (§2.3), not {type(rf).__name__}")
     t0, k = operator.index(t0), operator.index(k)
     _validate_inputs(R, W, s, rf, t0, k, cost_bps, borrow_bps, E0)
+    if leg_signals is not None:
+        _validate_leg_signals(R, W, s, leg_signals)
     calendar = R.index
     n = len(calendar)
     e = t0 + k
@@ -250,39 +263,63 @@ def run_backtest(
     d = daily_returns(w=w, R=R, rf=rf, cost_bps=cost_bps, borrow_bps=borrow_bps)
     gross_excess, borrow, cost, excess, total = d.gross_excess, d.borrow, d.cost, d.excess, d.total
 
-    # §7: trades are runs of non-zero, same-sign executed position.
-    trade_id = (pos.ne(pos.shift()) & pos.ne(0)).cumsum().where(pos.ne(0))  # NaN when flat
-    held_id = trade_id.shift(1)  # the trade that earns day t's P&L
+    # §7: trades are runs of non-zero, same-sign executed position (per leg for the trend portfolio).
+    leg_pos = None if leg_signals is None else leg_signals.shift(k).fillna(0.0)
+    if leg_pos is None:
+        trade_id = _trade_ids(pos)
+        held_id = trade_id.shift(1)  # the trade that earns day t's P&L
+        held = held_id.notna()
+    else:
+        local_id = leg_pos.apply(_trade_ids)  # numbered within each leg; renumbered below
+        held = local_id.shift(1).notna().any(axis=1)  # any leg held into day t (§5.8)
 
     # §6.2 ruin: the first evaluated day with total <= -1 ends the window.
-    credit = pd.Series(0.0, index=calendar)
+    credit = 0.0
     r = first_ruin_day(total, e)
     ruined = r is not None
     stop = r + 1 if ruined else n
     if ruined:
-        if pd.isna(held_id.iloc[r]):
+        if not held.iloc[r]:
             raise ValueError("ruin on a day with no position held into it; the cost inputs are out of range")
-        credit.iloc[r] = clip_ruin_day(excess, total, rf, r)  # >= 0, credited to the trade held into r
+        credit = clip_ruin_day(excess, total, rf, r)  # >= 0, credited to the trade(s) held into r
 
     # §7.1 attribution follows P&L timing, within the evaluation window.
-    a = d.gross_held
-    b = w.abs().sum(axis=1)
-    exit_frac = (a / (a + b).where(a + b > 0)).fillna(0.0)
-    to_held = gross_excess - borrow - cost * exit_frac + credit  # attributed to held_id
-    to_trade = -(cost - cost * exit_frac)  # attributed to trade_id
     window = slice(e, stop)  # every day before e is flat with zero weights
-    pnl = (
-        pd.concat(
-            [
-                pd.DataFrame({"id": held_id.iloc[window], "v": to_held.iloc[window]}),
-                pd.DataFrame({"id": trade_id.iloc[window], "v": to_trade.iloc[window]}),
-            ]
+    if leg_pos is None:
+        credit_by_day = pd.Series(0.0, index=calendar)
+        if ruined:
+            credit_by_day.iloc[r] = credit
+        pnl = _attribute(
+            held_id=held_id,
+            trade_id=trade_id,
+            gross_excess=gross_excess,
+            borrow=borrow,
+            cost=cost,
+            a=d.gross_held,
+            b=w.abs().sum(axis=1),
+            credit=credit_by_day,
+            window=window,
         )
-        .dropna(subset=["id"])
-        .groupby("id")["v"]
-        .sum()
-    )
-    trades = _trade_records(pnl, trade_id.iloc[:stop], held_id.iloc[:stop], pos, calendar, k, split)
+        trades = _trade_records(pnl, trade_id.iloc[:stop], held_id.iloc[:stop], pos, calendar, k, split)
+        trades["ticker"] = None
+    else:
+        trade_id, pnl, trades = _leg_trades(
+            local_id=local_id,
+            leg_pos=leg_pos,
+            w=w,
+            w_prev=d.w_prev,
+            R=R,
+            rf=rf,
+            cost_bps=cost_bps,
+            borrow_bps=borrow_bps,
+            credit=credit,
+            ruin_day=r,
+            window=window,
+            stop=stop,
+            k=k,
+            split=split,
+        )
+        held_id = trade_id.shift(1)
 
     # §6.2 equity: a baseline point E0 dated e - 1, then compounding total returns.
     eq = np.empty(stop - e + 1)
@@ -294,15 +331,17 @@ def run_backtest(
     return BacktestResult(
         w=w,
         pos=pos.rename("position"),
-        gross_held=a.rename("gross_held"),
+        held=held.rename("held"),
+        gross_held=d.gross_held.rename("gross_held"),
         gross_excess=gross_excess.rename("gross_excess"),
         borrow=borrow.rename("borrow"),
         turnover=d.turnover.rename("turnover"),
         cost=cost.rename("cost"),
         excess=excess.rename("excess"),
         total=total.rename("total"),
-        trade_id=trade_id.rename("trade_id"),
-        held_id=held_id.rename("held_id"),
+        trade_id=trade_id.rename("trade_id") if leg_pos is None else trade_id,
+        held_id=held_id.rename("held_id") if leg_pos is None else held_id,
+        leg_pos=leg_pos,
         pnl=pnl.rename("pnl"),
         trades=trades,
         equity=equity,
@@ -353,6 +392,171 @@ def _validate_inputs(
         raise ValueError(f"borrow_bps must be >= 0, got {borrow_bps}")
     if not E0 > 0:
         raise ValueError(f"E0 must be > 0, got {E0}")
+
+
+def _validate_leg_signals(R: pd.DataFrame, W: pd.DataFrame, s: pd.Series, leg_signals: pd.DataFrame) -> None:
+    """Checks for per-leg trades (§5.8): aligned legs, and s the invested flag they imply."""
+    if not (leg_signals.index.equals(R.index) and leg_signals.columns.equals(R.columns)):
+        raise ValueError("leg_signals must have exactly the index and columns of R")
+    if not leg_signals.isin([-1.0, 0.0, 1.0]).all().all():
+        raise ValueError("every leg signal must take values in {-1, 0, +1}")
+    if not ((W != 0) <= (leg_signals != 0)).all().all():
+        raise ValueError("W must be exactly 0 wherever that leg's signal is flat")
+    if not np.array_equal(s.to_numpy(), leg_signals.ne(0).any(axis=1).to_numpy(dtype=float)):
+        raise ValueError("s must be the invested flag: 1 where any leg's signal is non-zero, else 0")
+
+
+def _trade_ids(pos: pd.Series) -> pd.Series:
+    """§7: trade ids 1, 2, ... for runs of non-zero, same-sign executed position; NaN when flat."""
+    return (pos.ne(pos.shift()) & pos.ne(0)).cumsum().where(pos.ne(0))
+
+
+def _attribute(
+    *,
+    held_id: pd.Series,
+    trade_id: pd.Series,
+    gross_excess: pd.Series,
+    borrow: pd.Series,
+    cost: pd.Series,
+    a: pd.Series,
+    b: pd.Series,
+    credit: pd.Series,
+    window: slice,
+) -> pd.Series:
+    """§7.1 attribution of each day's excess return to trades, following P&L timing.
+
+    a and b are the gross exposure held into and out of each day; credit is the ruin day's
+    clipped amount (§6.2), credited to the trade held into it. Returns P&L per trade id.
+    """
+    exit_frac = (a / (a + b).where(a + b > 0)).fillna(0.0)
+    to_held = gross_excess - borrow - cost * exit_frac + credit  # attributed to held_id
+    to_trade = -(cost - cost * exit_frac)  # attributed to trade_id
+    return (
+        pd.concat(
+            [
+                pd.DataFrame({"id": held_id.iloc[window], "v": to_held.iloc[window]}),
+                pd.DataFrame({"id": trade_id.iloc[window], "v": to_trade.iloc[window]}),
+            ]
+        )
+        .dropna(subset=["id"])
+        .groupby("id")["v"]
+        .sum()
+    )
+
+
+def _leg_trades(
+    *,
+    local_id: pd.DataFrame,
+    leg_pos: pd.DataFrame,
+    w: pd.DataFrame,
+    w_prev: pd.DataFrame,
+    R: pd.DataFrame,
+    rf: pd.Series,
+    cost_bps: float,
+    borrow_bps: float,
+    credit: float,
+    ruin_day: int | None,
+    window: slice,
+    stop: int,
+    k: int,
+    split: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    """Per-leg trades of the trend portfolio (§7.4).
+
+    §7's identification, §7.1's attribution and §7.3's bookkeeping run leg by leg, each on that
+    leg's own exposure, gross excess w_{i,t-1}(r_i - rf), borrow fee and cost c |w_{i,t} - w_{i,t-1}|.
+    Every daily term is a sum over legs, so all legs' trades together reconcile with the excess
+    return (§7.2). A ruin-day credit is split across the legs held into that day in proportion to
+    their gross weight |w_{i,r-1}|.
+
+    Returns:
+        (trade_id, pnl, trades): trade ids per leg as a DataFrame, renumbered 1... across the
+        portfolio in order of entry date and then ticker; P&L per renumbered id; the trade records
+        with each trade's ticker.
+
+    This is the formulas of _attribute and _trade_records written with numpy arrays, because it
+    runs once per leg.
+    """
+    calendar = R.index
+    e = window.start
+    Rv = R.to_numpy(dtype=float, copy=True)
+    Rv[0] = 0.0  # as in daily_returns: only the first row may be NaN
+    wv, wp = w.to_numpy(dtype=float), w_prev.to_numpy(dtype=float)
+    # §7.1 per leg: each day's leg contribution, split between the trade held into it and the
+    # trade at its close by the leg's own exit fraction a / (a + b).
+    cost = (cost_bps / 10_000) * np.abs(wv - wp)
+    a, b = np.abs(wp), np.abs(wv)
+    exit_frac = np.divide(a, a + b, out=np.zeros_like(a), where=a + b > 0)
+    gross_excess = wp * (Rv - rf.to_numpy()[:, None])
+    borrow = (borrow_bps / 10_000 / 252) * np.maximum(-wp, 0.0)
+    to_held = gross_excess - borrow - cost * exit_frac
+    to_trade = -(cost - cost * exit_frac)
+    if ruin_day is not None:  # split by the gross weight held into the ruin day
+        to_held[ruin_day] += credit * a[ruin_day] / a[ruin_day].sum()
+
+    local = local_id.to_numpy(dtype=float)
+    pos = leg_pos.to_numpy(dtype=float)
+    records = []
+    for j, leg in enumerate(R.columns):
+        ids = np.nan_to_num(local[:stop, j], nan=0.0).astype(np.int64)  # 0 = flat
+        held = np.r_[0, ids[:-1]]  # held_id: the trade that earns day t's P&L
+        m = int(ids.max(initial=0))
+        if m == 0:
+            continue
+        sl = slice(e, stop)
+        pnl = (
+            np.bincount(held[sl], weights=to_held[sl, j], minlength=m + 1)
+            + np.bincount(ids[sl], weights=to_trade[sl, j], minlength=m + 1)
+        )[1:]
+        entry = np.flatnonzero((ids != np.r_[0, ids[:-1]]) & (ids > 0))  # trade i + 1 starts at entry[i]
+        holding = np.bincount(held, minlength=m + 1)[1:]
+        last_held = np.full(m + 1, -1)
+        held_days = np.flatnonzero(held)
+        np.maximum.at(last_held, held[held_days], held_days)
+        is_open = np.arange(1, m + 1) == ids[-1]  # still held at the end of the last day
+        exit_pos = np.where(is_open, -1, last_held[1:])
+        closed = ~is_open
+        exit_date = np.full(m, np.datetime64("NaT", "ns"))
+        exit_signal = exit_date.copy()
+        exit_date[closed] = calendar[exit_pos[closed]]
+        exit_signal[closed] = calendar[exit_pos[closed] - k]
+        entry_date = calendar[entry]
+        records.append(
+            pd.DataFrame(
+                {
+                    "local": np.arange(1, m + 1),
+                    "side": np.where(pos[entry, j] > 0, "long", "short"),
+                    "segment": np.where(entry_date < split, "is", "oos"),
+                    "open": is_open,
+                    "signal_date": calendar[entry - k],
+                    "entry_date": entry_date,
+                    "exit_signal_date": exit_signal,
+                    "exit_date": exit_date,
+                    "holding_days": holding.astype(np.int64),
+                    "pnl": pnl,
+                    "ticker": leg,
+                    "leg": j,
+                }
+            )
+        )
+    columns = ["id", "side", "segment", "open", "signal_date", "entry_date", "exit_signal_date"]
+    columns += ["exit_date", "holding_days", "pnl", "ticker"]
+    trade_id = pd.DataFrame(np.nan, index=calendar, columns=R.columns)
+    if not records:  # no leg ever traded
+        flat = pd.Series(np.nan, index=calendar[:stop])
+        trades = _trade_records(pd.Series(dtype=float), flat, flat, leg_pos.iloc[:, 0], calendar, k, split)
+        trades["ticker"] = None
+        return trade_id, pd.Series(dtype=float, index=pd.Index([], name="id")), trades
+    trades = pd.concat(records, ignore_index=True).sort_values(["entry_date", "ticker"], kind="stable")
+    trades.insert(0, "id", np.arange(1, len(trades) + 1, dtype=np.int64))
+    for j, leg_trades in trades.groupby("leg"):
+        new = np.full(int(np.nanmax(local[:, j])) + 1, np.nan)  # trades after a ruin day stay unnumbered
+        new[leg_trades["local"].to_numpy()] = leg_trades["id"].to_numpy()
+        valid = ~np.isnan(local[:, j])
+        trade_id.iloc[valid, j] = new[local[valid, j].astype(np.int64)]
+    trades = trades[columns].reset_index(drop=True)
+    pnl = pd.Series(trades["pnl"].to_numpy(), index=pd.Index(trades["id"].to_numpy(), name="id"))
+    return trade_id, pnl, trades
 
 
 def _trade_records(

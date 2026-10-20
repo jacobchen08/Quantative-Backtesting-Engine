@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { buildRequests, buildWalkForward, defaultForm, isoDate, L_DEFAULT, withStrategy, type FormState } from './form'
+import {
+  buildRequests,
+  buildWalkForward,
+  defaultForm,
+  isoDate,
+  isTrendLike,
+  L_DEFAULT,
+  parseTickerList,
+  PORTFOLIO_PRESETS,
+  withStrategy,
+  type FormState,
+} from './form'
 import type { BacktestRequest } from './types'
 
 const TODAY = '2026-10-16'
@@ -43,6 +54,28 @@ describe('defaults', () => {
     const back = withStrategy(trend, 'mean_reversion')
     expect(back.L).toBe('60')
     expect(back.pairY).toBe('KO') // everything else is kept
+    expect(withStrategy(back, 'trend_portfolio').L).toBe('252')
+  })
+
+  it('defaults the Phase 7 settings: rolling OLS, δ = 1e-6, the four trend ETFs at 40% each, a fixed block length', () => {
+    const f = defaultForm(TODAY)
+    expect([f.pairsModel, f.kalmanDelta]).toEqual(['ols', '1e-6'])
+    expect(parseTickerList(f.portfolioTickers)).toEqual(['SPY', 'QQQ', 'GLD', 'TLT'])
+    expect(f.portfolioVolPct).toBe('40')
+    expect([f.mcBlockLen, f.mcBlockAuto]).toEqual(['10', false])
+  })
+
+  it('splits ticker lists on commas and spaces, in the order typed', () => {
+    expect(parseTickerList('spy, qqq  gld;tlt\n IEF ')).toEqual(['SPY', 'QQQ', 'GLD', 'TLT', 'IEF'])
+    expect(parseTickerList(' , ')).toEqual([])
+    expect(PORTFOLIO_PRESETS.map((p) => p.tickers.length)).toEqual([4, 10])
+    expect(PORTFOLIO_PRESETS[1].tickers).toEqual(['SPY', 'QQQ', 'IWM', 'EFA', 'EEM', 'TLT', 'IEF', 'GLD', 'DBC', 'VNQ'])
+    expect(['trend', 'trend_portfolio', 'pairs', 'mean_reversion'].map((s) => isTrendLike(s as never))).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ])
   })
 
   it('formats local dates as YYYY-MM-DD', () => {
@@ -52,10 +85,10 @@ describe('defaults', () => {
 })
 
 describe('only the controls that apply are sent (§13)', () => {
-  it('pairs: z thresholds and hedge mode, no signal frequency', () => {
+  it('pairs: z thresholds, hedge mode and model, no signal frequency', () => {
     const { backtest } = built(form())
     expect(keys(backtest)).toEqual(
-      ['L', 'borrow_bps', 'cost_bps', 'end', 'execution_lag', 'hedge_mode', 'risk_free', 'start', 'strategy', 'tickers', 'z_entry', 'z_exit'].sort(),
+      ['L', 'borrow_bps', 'cost_bps', 'end', 'execution_lag', 'hedge_mode', 'pairs_model', 'risk_free', 'start', 'strategy', 'tickers', 'z_entry', 'z_exit'].sort(),
     )
     expect(backtest).toEqual({
       strategy: 'pairs',
@@ -66,11 +99,60 @@ describe('only the controls that apply are sent (§13)', () => {
       z_entry: 2,
       z_exit: 0.5,
       hedge_mode: 'fixed_at_entry',
+      pairs_model: 'ols',
       cost_bps: 10,
       borrow_bps: 0,
       execution_lag: 1,
       risk_free: 'tbill',
     })
+  })
+
+  it('pairs: δ is sent only with the Kalman model (§5.7)', () => {
+    expect(built(form({ kalmanDelta: '' })).backtest).not.toHaveProperty('kalman_delta') // ignored, not checked
+    const kalman = built(form({ pairsModel: 'kalman', kalmanDelta: ' 2.5e-6 ' })).backtest
+    expect(kalman).toMatchObject({ pairs_model: 'kalman', kalman_delta: 2.5e-6 })
+    expect(built(form({ pairsModel: 'kalman' })).backtest.kalman_delta).toBe(1e-6) // the default
+    expect(errorOf(form({ pairsModel: 'kalman', kalmanDelta: '' }))).toBe('Kalman δ is required.')
+    for (const strategy of ['mean_reversion', 'trend', 'trend_portfolio'] as const) {
+      const other = built(withStrategy(form({ pairsModel: 'kalman' }), strategy)).backtest
+      expect(other).not.toHaveProperty('pairs_model')
+      expect(other).not.toHaveProperty('kalman_delta')
+    }
+  })
+
+  it('trend portfolio: a ticker list, signal frequency and the per-asset vol settings (§5.8)', () => {
+    const f = withStrategy(form({ portfolioTickers: ' spy, qqq\nGLD  tlt ', signalFrequency: 'daily' }), 'trend_portfolio')
+    const { backtest } = built(f)
+    expect(backtest).toEqual({
+      strategy: 'trend_portfolio',
+      tickers: ['SPY', 'QQQ', 'GLD', 'TLT'],
+      start: '2015-01-01',
+      end: TODAY,
+      L: 252,
+      signal_frequency: 'daily',
+      cost_bps: 10,
+      borrow_bps: 0,
+      allow_short: true,
+      execution_lag: 1,
+      risk_free: 'tbill',
+      vol_target: 0.4, // always sent: the overlay can't be off (§5.8)
+      vol_halflife: 42,
+      vol_refresh: 'weekly',
+      max_leverage: 2,
+    })
+    expect(f.volOn).toBe(false) // the single-asset overlay switch plays no part
+    const tuned = built({ ...f, portfolioVolPct: '25', volTargetPct: '12', maxLeverage: '3', longOnly: true }).backtest
+    expect(tuned).toMatchObject({ vol_target: 0.25, max_leverage: 3, allow_short: false })
+    expect(errorOf({ ...f, portfolioTickers: ' , ' })).toBe('Tickers is required.')
+    expect(errorOf({ ...f, portfolioVolPct: '' })).toBe('Per-asset vol target is required.')
+    // The count (2-12) and uniqueness are the API's to check, like every range.
+    expect(built({ ...f, portfolioTickers: 'SPY' }).backtest.tickers).toEqual(['SPY'])
+  })
+
+  it('the overlay settings of one strategy are not checked for the other', () => {
+    const portfolio = withStrategy(form({ volOn: true, volTargetPct: '' }), 'trend_portfolio')
+    expect(buildRequests(portfolio).ok).toBe(true)
+    expect(buildRequests(form({ portfolioVolPct: '', portfolioTickers: '' })).ok).toBe(true)
   })
 
   it('mean reversion: one ticker, z thresholds, no hedge mode or signal frequency', () => {
@@ -189,6 +271,12 @@ describe('sensitivity and Monte Carlo requests', () => {
     })
   })
 
+  it('sends block_len "auto" instead of a number when automatic is on (§10.8)', () => {
+    expect(built(form({ mcBlockAuto: true, mcBlockLen: '' })).monteCarlo.block_len).toBe('auto') // not checked
+    expect(built(form({ mcBlockLen: '21' })).monteCarlo.block_len).toBe(21)
+    expect(errorOf(form({ mcBlockLen: '' }))).toBe('Block length is required.')
+  })
+
   it('omits a blank seed so the API draws one', () => {
     expect(built(form()).monteCarlo).not.toHaveProperty('seed')
     expect(built(form({ mcSeed: '42' })).monteCarlo.seed).toBe(42)
@@ -226,6 +314,8 @@ describe('the walk-forward request (§9.2, §13)', () => {
     const trend = walkForward(withStrategy(form({ ticker: 'TLT' }), 'trend'))
     expect(trend).toMatchObject({ strategy: 'trend', tickers: ['TLT'], L: 252, signal_frequency: 'monthly' })
     for (const hidden of ['z_entry', 'z_exit', 'hedge_mode', 'vol_target']) expect(trend).not.toHaveProperty(hidden)
+    const portfolio = walkForward(withStrategy(form(), 'trend_portfolio'))
+    expect(portfolio).toMatchObject({ strategy: 'trend_portfolio', tickers: ['SPY', 'QQQ', 'GLD', 'TLT'], vol_target: 0.4 })
   })
 
   it('reports a blank or non-numeric window by its label', () => {

@@ -502,3 +502,135 @@ def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
     explicit = post(client, "/api/backtest", {**request, "borrow_bps": 0, "allow_short": True})
     assert implicit["resolved"]["borrow_bps"] == 0.0 and implicit["resolved"]["allow_short"] is True
     assert {**implicit, "run_id": None} == {**explicit, "run_id": None}
+
+
+# ---------------------------------------------------------------- Phase 7
+
+PORTFOLIO = ["T08", "T15", "T20", "T30"]
+
+
+def test_trend_portfolio_backtest(client: TestClient) -> None:
+    request = {
+        "strategy": "trend_portfolio",
+        "tickers": [t.lower() for t in PORTFOLIO],
+        "start": START,
+        "end": END,
+    }
+    out = post(client, "/api/backtest", {**request, "L": 126})
+    BacktestResponse.model_validate(out)
+    resolved, series = out["resolved"], out["series"]
+    assert resolved["tickers"] == PORTFOLIO and resolved["vol_target"] == 0.40  # null -> 0.40 per asset
+    assert (
+        resolved["vol_halflife"] == 42
+        and resolved["vol_refresh"] == "weekly"
+        and resolved["max_leverage"] == 2.0
+    )
+    assert resolved["z_entry"] is resolved["pairs_model"] is resolved["kalman_delta"] is None
+    assert series["score"] is None and series["vol_forecast"] is None and out["diagnostics"] is None
+    assert [leg["ticker"] for leg in series["legs"]] == PORTFOLIO
+    n = len(series["dates"])
+    for leg in series["legs"]:
+        assert all(len(leg[name]) == n for name in ("score", "position", "weight", "vol_forecast"))
+    gross = [sum(abs(leg["weight"][i]) for leg in series["legs"]) for i in range(n)]
+    assert gross == pytest.approx(series["gross_exposure"], abs=1e-15) and max(gross) <= 2.0 + 1e-12
+    for leg in series["legs"]:  # executed position and weight agree; the forecast is a volatility
+        assert all(
+            (p > 0) == (w > 0) and (p < 0) == (w < 0)
+            for p, w in zip(leg["position"], leg["weight"], strict=True)
+        )
+        assert all(v > 0 for v in leg["vol_forecast"] if v is not None)
+    assert any(
+        s < 0 for leg in series["legs"] for s in leg["score"] if s is not None
+    )  # a trailing excess return
+    assert set(series["position"]) <= {0.0, 1.0}  # the invested flag
+    trades = out["trades"]
+    assert (
+        trades
+        and {t["ticker"] for t in trades} <= set(PORTFOLIO)
+        and all(t["beta_at_entry"] is None for t in trades)
+    )
+    assert [t["id"] for t in trades] == list(range(1, len(trades) + 1))
+    sizing = out["sizing"]
+    assert sizing["vol_target"] == 0.40 and 0 <= sizing["pct_days_at_cap"] <= 1
+    # Per asset, 40% / 8% and 40% / 15% exceed the cap of 2 (0.5 per leg): legs sit at their cap.
+    cap_warnings = [w for w in out["warnings"] if "not reachable within max_leverage" in w]
+    assert sizing["pct_days_at_cap"] > 0.25 and len(cap_warnings) == 1
+    assert "invested asset-days" in cap_warnings[0] and "max_leverage / N" in cap_warnings[0]
+    assert out["metrics"]["full"]["n_closed_trades"] + out["metrics"]["full"]["n_open_trades"] == len(trades)
+    assert out["benchmark_metrics"]["full"]["pct_days_in_market"] == 1.0
+    # The trend grid: one column over L, no z_entry axis.
+    grid = post(client, "/api/sensitivity", {**request, "L_values": [63, 126], "z_entry_values": [2.0]})
+    SensitivityResponse.model_validate(grid)
+    assert grid["z_entry_values"] is None and [len(row) for row in grid["sharpe"]] == [1, 1]
+    wf = post(
+        client, "/api/walk-forward", {**request, "L_values": [63, 126], "train_days": 252, "test_days": 126}
+    )
+    WalkForwardResponse.model_validate(wf)
+    assert wf["resolved"]["z_entry_values"] is None and wf["n_configs"] == 2
+
+
+@pytest.mark.parametrize(
+    "payload, phrase",
+    [
+        ({"strategy": "trend_portfolio", "tickers": ["T08"]}, "trend_portfolio needs 2 to 12 tickers, got 1"),
+        (
+            {"strategy": "trend_portfolio", "tickers": [f"A{i}" for i in range(13)]},
+            "trend_portfolio needs 2 to 12 tickers, got 13",
+        ),
+        ({"strategy": "trend_portfolio", "tickers": ["T08", "t08"]}, "distinct"),
+        ({"strategy": "trend_portfolio", "tickers": PORTFOLIO, "vol_target": 0.04}, "0.05 and 0.6"),
+        ({"strategy": "trend", "tickers": ["SPY"], "vol_target": 0.55}, "0.01 and 0.5"),
+        (
+            {"strategy": "pairs", "tickers": ["Y", "X"], "pairs_model": "kalman", "kalman_delta": 0.5},
+            "kalman_delta",
+        ),
+    ],
+    ids=["one-ticker", "thirteen-tickers", "duplicate", "portfolio-target", "trend-target", "kalman-delta"],
+)
+def test_phase7_validation(client: TestClient, payload: dict, phrase: str) -> None:
+    out = post(client, "/api/backtest", {**payload, "start": START, "end": END}, status=422)
+    assert phrase in out["detail"], out["detail"]
+
+
+def test_kalman_pairs_and_its_ignored_delta(client: TestClient) -> None:
+    base = {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    kalman = post(client, "/api/backtest", {**base, "pairs_model": "kalman"})
+    BacktestResponse.model_validate(kalman)
+    assert kalman["resolved"]["pairs_model"] == "kalman" and kalman["resolved"]["kalman_delta"] == 1e-6
+    assert (
+        kalman["trades"] and kalman["diagnostics"] is not None
+    )  # the diagnostics test the pair, not the model
+    ols = post(client, "/api/backtest", {**base, "kalman_delta": 0.5})  # out of range, but ignored with "ols"
+    assert ols["resolved"]["pairs_model"] == "ols" and ols["resolved"]["kalman_delta"] is None
+    assert kalman["series"]["beta"] != ols["series"]["beta"]
+    trend = post(
+        client,
+        "/api/backtest",
+        {
+            "strategy": "trend",
+            "tickers": ["SPY"],
+            "start": START,
+            "end": END,
+            "pairs_model": "kalman",
+            "kalman_delta": 1e-3,
+        },
+    )
+    assert trend["resolved"]["pairs_model"] is None and trend["resolved"]["kalman_delta"] is None
+
+
+def test_monte_carlo_with_automatic_block_length(client: TestClient) -> None:
+    request = {"source": "ticker", "ticker": "SPY", "start": START, "end": END, "seed": 3, **SMALL_MC}
+    auto = post(client, "/api/monte-carlo", {**request, "block_len": "auto"})
+    MonteCarloResponse.model_validate(auto)
+    used = auto["resolved"]["block_len_used"]
+    assert auto["resolved"]["block_len"] == "auto"
+    assert 1 <= used["stationary"] <= used["circular"] <= 63
+    fixed = post(client, "/api/monte-carlo", {**request, "block_len": 12})
+    assert fixed["resolved"]["block_len_used"] == {"circular": 12, "stationary": 12}
+    for model in ("gbm", "bootstrap", "stationary"):
+        assert sum(fixed[model]["hist_counts"]) == 1000 and len(fixed[model]["sample_paths"]) == 20
+    for bad in ("automatic", 0, 64):
+        assert (
+            "block_len"
+            in post(client, "/api/monte-carlo", {**request, "block_len": bad}, status=422)["detail"]
+        )

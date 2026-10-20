@@ -79,7 +79,7 @@ quant-engine/
   backend/
     pyproject.toml           # ruff + pytest configuration
     requirements.txt         # exact pins (pip freeze of runtime deps)
-    requirements-dev.txt     # pytest, ruff
+    requirements-dev.txt     # pytest, pytest-xdist (Phase 7), ruff
     app/
       __init__.py            # __version__ = engine version
       main.py                # FastAPI app, lifespan (create tables), CORS, routes
@@ -115,6 +115,7 @@ quant-engine/
 - **Lint:** `ruff check` and `ruff format --check` for the backend; ESLint from the Vite template for the frontend.
 - **Later dependencies.** Each is pinned exactly when its phase adds it:
   - `arch` in `requirements.txt` (Phase 7), after the §10.8 check;
+  - `pytest-xdist` in `requirements-dev.txt` (Phase 7), with `-n auto` in pytest's `addopts`, so the suite runs one worker per core and `python -m pytest` stays the command (§12);
   - `@playwright/test` in the frontend's devDependencies (Phase 8). Browsers are installed with `npx playwright install chromium`, and `--with-deps` in CI.
 - **CI (GitHub Actions, every push):**
   - backend lint and tests on Python 3.12 and 3.14;
@@ -401,7 +402,7 @@ An alternative to §5.3's rolling OLS. The hedge ratio adapts at a rate set by �
 **Model**, on the rebased log prices y and x of §5.3, following Chan (2013):
 - state s_t = (α_t, β_t)ᵀ, a random walk: s_t = s_{t−1} + w_t, with w_t ~ N(0, q·I₂);
 - observation y_t = h_t·s_t + e_t, with h_t = (1, x_t) and e_t ~ N(0, R);
-- q = δ / (1 − δ), where δ = `kalman_delta` (default 1e-4, valid range [1e-7, 1e-2]).
+- q = δ / (1 − δ), where δ = `kalman_delta` (default 1e-6, valid range [1e-7, 1e-2]). The default was 1e-4 until Phase 7 measured it: on KO/PEP, 2015–2025, the std of z was 0.35 at 1e-4 and 1.13 at 1e-6, and at 1e-4 the model made 4 trades (METHODOLOGY, Phase 7 deviations).
 
 **Initialization** from days 0…L−1, with H the L×2 matrix of rows (1, x_t):
 - ŝ = OLS of y on H;
@@ -522,7 +523,7 @@ total = rf + excess                        # daily total return (cash earns rf)
 - **Ruin.** A single-asset short loses more than 100% on any day the stock more than doubles (GME rose 134.8% on 2021-01-27; verified). Let r be the first evaluated day with total_r ≤ −1. Then:
   - **The evaluation window ends at r.** Series, metrics and trades all stop there.
   - total_r is clipped to −1, so E_r = 0 and the drawdown is −100%. The model assumes limited liability and no margin calls.
-  - Clipping raises that day's excess return. Credit the difference (the clipped excess minus the unclipped excess, which is ≥ 0) to the trade held into r (`held_id` at r), so the §7.2 reconciliation still holds. That trade always exists: a flat day earns rf minus at most 2c, so it can never reach −100%.
+  - Clipping raises that day's excess return. Credit the difference (the clipped excess minus the unclipped excess, which is ≥ 0) to the trade held into r (`held_id` at r), so the §7.2 reconciliation still holds. A trend portfolio can hold several legs into r; the credit is then split across their trades by gross weight (§7.4). That trade always exists: a flat day earns rf minus at most 2c, so it can never reach −100%.
   - Positions still open at r are reported as `open` trades.
   - Set `ruined = true` and add a warning.
   - A segment that would start after r gets `null` metrics.
@@ -601,6 +602,7 @@ A trend portfolio holds several independent legs, so "a run of same-sign positio
 - **Attribution.** Use §7.1 leg by leg, with that leg's own a = |w_{i,t−1}|, b = |w_{i,t}|, gross excess w_{i,t−1}(r_i − rf), borrow and cost c·|w_{i,t} − w_{i,t−1}|. Every term is a sum over legs, so the §7.2 reconciliation holds over all legs' trades together.
 - **Bookkeeping.** §7.3 runs per leg. Trade ids are numbered 1… across the whole portfolio, in order of entry date and then ticker.
 - In-trade resizing by the vol overlay is a cost of the leg's open trade, as in §7.1.
+- **Ruin (§6.2).** The clipped amount on the ruin day r is split across the trades held into r in proportion to each leg's gross weight held into the day: leg i's trade gets the share |w_{i,r−1}| / Σ_j |w_{j,r−1}|. The reconciliation then stays exact.
 
 ## 8. Metrics and Warnings (`services/metrics.py`)
 - Every metric is computed per segment (IS, OOS and full) over that segment's n evaluated days. Standard deviations use `ddof=1`.
@@ -841,7 +843,7 @@ Return both α levels next to the simulated values. During review, simulation ag
 - **API caps** (n_paths ≤ 50,000, and n_paths × (horizon + 1) ≤ 12,700,000) keep peak memory around 200 MB. For comparison, the bootstrap at 100k × 252 measured 410 MB.
 
 ### 10.7 Model 3: stationary bootstrap (Phase 7)
-The stationary bootstrap of Politis & Romano (1994) draws blocks with **random**, geometrically distributed lengths, mean `block_len`, instead of a fixed length. The resampled series is then stationary, and the results are less sensitive to the exact block length.
+The stationary bootstrap of Politis & Romano (1994) draws blocks with **random**, geometrically distributed lengths, mean `block_len`, instead of a fixed length. The block boundaries then fall at random rather than every `block_len` days, so the resampled series is stationary. (Phase 7 found its results no less sensitive to the block length than the circular bootstrap's: on SPY they were more so. See METHODOLOGY §29.)
 - At each step, with probability p = 1/`block_len`, start a new block at a uniform random index. Otherwise continue with the next index, circularly. Step 0 always starts a block.
 - **Vectorized per chunk of paths.** Process the N paths in column chunks of at most 2,048, filling `P[1:, chunk]` in place. The temporaries are then about 3 × T × 2,048 values instead of 3 × T × N, so peak memory stays near the §10.6 budget. The chunk loop is allowed.
   ```python
@@ -897,7 +899,7 @@ The response reports the lengths actually used.
 | `execution_lag` | int | 1 | 0–5 |
 | `hedge_mode` | `"fixed_at_entry"` \| `"rolling"` | `"fixed_at_entry"` | pairs only |
 | `pairs_model` | `"ols"` \| `"kalman"` | `"ols"` | pairs only (Phase 7, §5.7) |
-| `kalman_delta` | float | 1e-4 | 1e-7–1e-2; pairs with `pairs_model="kalman"` only |
+| `kalman_delta` | float | 1e-6 | 1e-7–1e-2; pairs with `pairs_model="kalman"` only (§5.7) |
 | `borrow_bps` | float | 0 | 0–2,000; annual fee on short notional (Phase 5, §6.1) |
 | `allow_short` | bool | true | false is 422 for pairs (Phase 5, §5.9) |
 | `vol_target` | float \| null | null (overlay off); for trend_portfolio, null → 0.40 | 0.01–0.50 (annualized); 0.05–0.60 per asset for trend_portfolio, where the overlay is always on (§5.8) |
@@ -980,7 +982,8 @@ type BacktestResponse = {
     is_oos: boolean[];
     rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // Phase 5, §8.2
     legs: { ticker: string; score: (number | null)[]; position: number[];
-            weight: number[]; vol_forecast: (number | null)[] }[] | null; // Phase 7: trend_portfolio only; executed values
+            weight: number[]; vol_forecast: (number | null)[] }[] | null; // Phase 7: trend_portfolio only; position and weight
+                                              // are executed values, score and vol_forecast as of each close (like score above)
   };
   sizing: { vol_target: number; max_leverage: number;
             pct_days_at_cap: number | null } | null;   // whole object null when the overlay is off; pct null if never invested
@@ -1055,6 +1058,7 @@ type MonteCarloResponse = {
 - Equity curves are not stored, so comparisons cover metrics only. Re-running a stored request reproduces its curves on the same cached data (§14).
 
 ## 12. Tests (pytest; no network; full suite under 60 s)
+From Phase 7 the suite runs in parallel with pytest-xdist (`-n auto` in `pyproject.toml`), because one process took 71.6 s. Tests must therefore not depend on running order or on state shared between tests; `-n 0` runs them in one process for debugging.
 
 ### `conftest.py`
 - **Fake network (autouse).** A fixture replaces `fetch_from_yahoo` with a fake. The fake serves synthetic frames, counts its calls, and raises for any ticker it doesn't know. No test can reach the network.
@@ -1100,7 +1104,7 @@ type MonteCarloResponse = {
 9. **Kalman pairs model (Phase 7):**
    - **Against OLS.** With δ = 0, the filtered (α_t, β_t) equals an expanding-window OLS of y on (1, x) over days 0…t within 1e-8, on at least 20 sampled t (§5.7).
    - **Against the reference.** It matches the plain matrix recursion of §5.7 within 1e-12 (this covers an unrolled implementation), and P stays symmetric with positive eigenvalues throughout.
-   - **Standardization.** On data simulated from the model itself, with known δ and R, the innovation z has mean within 0.05 of 0 and std within 0.05 of 1 over 5,000 days.
+   - **Standardization.** On data simulated from the model itself, with known δ and R, the innovation z has mean within 0.05 of 0 and std within 0.05 of 1 over 5,000 filtered days. Hold the simulated state constant over the start-up days 0…L−1, which is what the OLS initialization assumes, and call the filter function directly with L = 2,000 (outside the API's range), so the sampling error of the estimated R stays small. A state that drifts from day 0 inflates the estimated R and shrinks z: in the Phase 7 prototype, almost no seed met the bounds that way, while all 200 did with this setup (METHODOLOGY §27).
    - **Degenerate inputs.** Exactly collinear log prices or a flat-X warm-up window give an all-NaN z, a flat signal and no inf.
 10. **Trend portfolio (Phase 7):**
     - each leg's score equals single-asset trend's score for that ticker (§5.5), masked by that leg's forecast;

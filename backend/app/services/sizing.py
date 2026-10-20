@@ -108,3 +108,40 @@ def size_weights(
     if W.isna().any().any():
         raise ValueError("sized weights contain NaN")
     return SizedWeights(weights=W, scale=scale.rename("scale"), scale_used=scale_used.rename("scale_used"))
+
+
+def size_portfolio(
+    leg_signals: pd.DataFrame,
+    sigmas: pd.DataFrame,
+    *,
+    vol_target: float,
+    max_leverage: float,
+    vol_refresh: Literal["daily", "weekly", "monthly"],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Step 5 of §5.0 for the trend portfolio (§5.8): every leg sized to the same ex-ante vol.
+
+    Args:
+        leg_signals: each leg's raw signal s_i in {-1, 0, +1}, one column per ticker.
+        sigmas: each leg's annualized vol forecast from its own daily return, same shape.
+        vol_target: the per-asset annualized target (decimal); max_leverage caps each scale.
+        vol_refresh: §5.6's refresh rule, applied with each leg's own signal.
+
+    Returns:
+        (W, scale_used): w_i = s_i * scale_used_i / N, exactly 0.0 where s_i = 0. Each leg is at
+        most max_leverage / N, so the gross exposure never exceeds max_leverage.
+    """
+    n_legs = leg_signals.shape[1]
+    W = pd.DataFrame(0.0, index=leg_signals.index, columns=leg_signals.columns)
+    scale_used = pd.DataFrame(index=leg_signals.index, columns=leg_signals.columns, dtype=float)
+    for leg in leg_signals.columns:
+        sized = size_weights(
+            leg_signals[[leg]],
+            leg_signals[leg],
+            sigmas[leg],
+            vol_target=vol_target,
+            max_leverage=max_leverage,
+            vol_refresh=vol_refresh,
+        )
+        W[leg] = sized.weights[leg] / n_legs
+        scale_used[leg] = sized.scale_used
+    return W, scale_used

@@ -27,6 +27,22 @@ export const COLORS = {
   fixed: '#60a5fa', // blue-400: the walk-forward's fixed-parameter comparison
 } as const
 
+/** One colour per trend-portfolio leg (up to 12, §5.8), in the request's ticker order. */
+export const LEG_COLORS = [
+  '#34d399', // emerald-400
+  '#60a5fa', // blue-400
+  '#fbbf24', // amber-400
+  '#f472b6', // pink-400
+  '#a78bfa', // violet-400
+  '#a3e635', // lime-400
+  '#fb923c', // orange-400
+  '#22d3ee', // cyan-400
+  '#fb7185', // rose-400
+  '#2dd4bf', // teal-400
+  '#facc15', // yellow-400
+  '#818cf8', // indigo-400
+] as const
+
 /** Every backtest chart shares this syncId and the same `series` rows, so their indexes line up (§13). */
 export const BACKTEST_SYNC_ID = 'backtest'
 

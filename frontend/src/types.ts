@@ -1,9 +1,10 @@
 // API types. The response types copy CLAUDE.md §11.3 exactly; backend/app/schemas.py mirrors the
 // same contract. Returns, rates and weights are decimals (0.01 = 1%); dates are "YYYY-MM-DD".
 
-export type Strategy = 'mean_reversion' | 'pairs' | 'trend'
+export type Strategy = 'mean_reversion' | 'pairs' | 'trend' | 'trend_portfolio'
 export type SignalFrequency = 'monthly' | 'daily'
 export type HedgeMode = 'fixed_at_entry' | 'rolling'
+export type PairsModel = 'ols' | 'kalman'
 export type VolRefresh = 'daily' | 'weekly' | 'monthly'
 
 // ---------------------------------------------------------------- requests (§11.2)
@@ -22,6 +23,8 @@ export type BacktestRequest = {
   cost_bps?: number
   execution_lag?: number
   hedge_mode?: HedgeMode
+  pairs_model?: PairsModel
+  kalman_delta?: number
   borrow_bps?: number
   allow_short?: boolean
   vol_target?: number | null
@@ -53,7 +56,7 @@ export type MonteCarloRequest = {
   end?: string | null
   n_paths?: number
   horizon?: number
-  block_len?: number
+  block_len?: number | 'auto'
   seed?: number | null
   zero_drift?: boolean
 }
@@ -72,6 +75,8 @@ export type ResolvedBacktestRequest = {
   cost_bps: number
   execution_lag: number
   hedge_mode: HedgeMode | null
+  pairs_model: PairsModel | null
+  kalman_delta: number | null
   borrow_bps: number
   allow_short: boolean
   vol_target: number | null
@@ -92,7 +97,7 @@ export type ResolvedMonteCarloRequest = {
   end: string | null
   n_paths: number
   horizon: number
-  block_len: number
+  block_len: number | 'auto'
   seed: number | null
   zero_drift: boolean
 }
@@ -113,6 +118,7 @@ export type Trade = {
   id: number; side: "long" | "short"; segment: "is" | "oos"; open: boolean;
   signal_date: string; entry_date: string; exit_signal_date: string | null; exit_date: string | null;
   holding_days: number; pnl: number; beta_at_entry: number | null;
+  ticker: string | null;                                        // Phase 7: the leg, for trend_portfolio only
 };
 type BySegment<T> = { is: T; oos: T | null; full: T };          // oos is null only if ruin happened in IS
 export type BacktestResponse = {
@@ -125,11 +131,14 @@ export type BacktestResponse = {
     daily_return: (number | null)[];          // daily TOTAL return (matches equity); null up to and including the baseline
     position: number[];                       // executed position pos
     gross_exposure: number[];                 // executed sum of |w| at the end of each day (shows leverage over time)
-    score: (number | null)[];                 // z (mean_reversion, pairs) or sampled trailing excess return m (trend)
-    beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only
-    vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off
+    score: (number | null)[] | null;          // z (mean_reversion, pairs) or sampled trailing excess return m (trend);
+                                              // null for trend_portfolio (Phase 7), whose scores are in legs
+    beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only (filtered beta with pairs_model="kalman")
+    vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off and for trend_portfolio
     is_oos: boolean[];
     rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // Phase 5, §8.2
+    legs: { ticker: string; score: (number | null)[]; position: number[];
+            weight: number[]; vol_forecast: (number | null)[] }[] | null; // Phase 7: trend_portfolio only; executed values
   };
   sizing: { vol_target: number; max_leverage: number;
             pct_days_at_cap: number | null } | null;   // whole object null when the overlay is off; pct null if never invested
@@ -137,7 +146,7 @@ export type BacktestResponse = {
   metrics: { is: Metrics; oos: Metrics | null; full: Metrics };            // oos is null only if ruin happened in IS
   benchmark_metrics: { is: Metrics; oos: Metrics | null; full: Metrics };  // same window as the strategy
   diagnostics: { coint_p_is: number | null; coint_p_oos: number | null; half_life_is: number | null;
-                 static_beta_is: number | null; static_alpha_is: number | null } | null;    // pairs only (null for mean_reversion and trend)
+                 static_beta_is: number | null; static_alpha_is: number | null } | null;    // pairs only (null for the other strategies)
   cost_sensitivity: { cost_bps: number[];                       // Phase 5, §8.1; null if ruined
                       sharpe: BySegment<(number | null)[]>;     // one value per cost_bps entry
                       break_even_bps: BySegment<number | null> } | null;
@@ -146,8 +155,8 @@ export type BacktestResponse = {
   ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 export type SensitivityResponse = {
-  L_values: number[]; z_entry_values: number[] | null;          // null for trend
-  sharpe: (number | null)[][];                                  // rows = L; one column for trend
+  L_values: number[]; z_entry_values: number[] | null;          // null for trend and trend_portfolio
+  sharpe: (number | null)[][];                                  // rows = L; one column for trend and trend_portfolio
   n_configs_tested: number; window: { start: string; end: string };
   selected: { L: number; z_entry: number | null } | null;       // the request's own cell, if it is in the grid
   deflated: { n_trials: number; sr0_star: number | null;        // Phase 5, §9.1; sr0_star annualized for display
@@ -174,16 +183,19 @@ export type ModelResult = {
   var95: number; var99: number; cvar95: number; cvar99: number; elapsed_ms: number;
 };
 export type MonteCarloResponse = {
-  resolved: ResolvedMonteCarloRequest & { seed: number; n_hist: number; mu_daily: number; sigma_daily: number };
+  resolved: ResolvedMonteCarloRequest & { seed: number; n_hist: number; mu_daily: number; sigma_daily: number;
+                                          block_len_used: { circular: number; stationary: number } };   // Phase 7
   gbm: ModelResult; bootstrap: ModelResult;
+  stationary: ModelResult;                                      // Phase 7, §10.7
   closed_form_gbm: { var95: number; var99: number; cvar95: number; cvar99: number };
-  hist_edges: number[];            // 51, shared by both models
+  hist_edges: number[];            // 51, shared by the three models
   elapsed_ms_total: number;
 };
 
 // ---------------------------------------------------------------- aliases of the types above
 
 export type Series = BacktestResponse['series']
+export type LegSeries = NonNullable<Series['legs']>[number]
 export type SegmentMetrics = BacktestResponse['metrics']
 export type SegmentKey = keyof SegmentMetrics
 export type ResolvedBacktestRun = BacktestResponse['resolved']

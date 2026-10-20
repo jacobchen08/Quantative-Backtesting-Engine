@@ -150,7 +150,9 @@ def pct_days_at_cap(gross_held: object, held: object, max_leverage: float) -> fl
     """Share of invested days whose held gross exposure is >= max_leverage * (1 - 1e-9) (§5.6).
 
     gross_held is sum_i |w_{i,t-1}|, the exposure held into each day; held marks the days whose
-    held_id is not null. None when no day is invested.
+    held_id is not null. None when no day is invested. For the trend portfolio (§5.8) the inputs
+    are per leg, (days, legs): |w_{i,t-1}| and whether leg i was held into day t, with the
+    per-leg cap max_leverage / N, so the share is of invested asset-days.
     """
     g, inv = _arr(gross_held), np.asarray(held, dtype=bool)
     if not inv.any():
@@ -437,11 +439,13 @@ def build_warnings(
     collinear_oos: bool = False,
     break_even_full_bps: float | None = None,
     cost_bps: float = 0.0,
+    per_leg_cap: bool = False,
 ) -> list[str]:
     """The §8 warnings that the pure core can detect.
 
     The data-cleaning warnings (§4.4) come from the loader and are added by the API.
     trades may carry a beta_at_entry column (pairs); NaN there means not applicable.
+    per_leg_cap: pct_at_cap is a share of invested asset-days against max_leverage / N (§5.8).
     """
     out: list[str] = []
     if coint_p_is is not None and coint_p_is >= COINT_ALPHA:
@@ -471,9 +475,15 @@ def build_warnings(
     if ruin_date is not None:
         out.append(ruin_warning(ruin_date))
     if pct_at_cap is not None and pct_at_cap > CAP_WARNING_SHARE:
+        where = (
+            "Legs were at their leverage cap (max_leverage / N) on "
+            if per_leg_cap
+            else "The position was at the leverage cap on "
+        )
+        days = "invested asset-days" if per_leg_cap else "invested days"
         out.append(
-            f"The position was at the leverage cap on {pct_at_cap:.0%} of invested days (more than "
-            f"{CAP_WARNING_SHARE:.0%}): the volatility target is not reachable within max_leverage."
+            f"{where}{pct_at_cap:.0%} of {days} (more than {CAP_WARNING_SHARE:.0%}): "
+            "the volatility target is not reachable within max_leverage."
         )
     if break_even_full_bps is not None and break_even_full_bps < BREAK_EVEN_MULTIPLE * cost_bps:
         out.append(

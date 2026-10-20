@@ -51,6 +51,11 @@ export function fmtPValue(p: number | null | undefined): string {
   return p < 0.001 ? '<0.001' : p.toFixed(3)
 }
 
+/** A whole number of days: 1 -> "1 day", 10 -> "10 days". */
+export function fmtDayCount(n: number): string {
+  return `${n} day${n === 1 ? '' : 's'}`
+}
+
 /** Trading days: 12.34 -> "12.3 d". */
 export function fmtDays(x: number | null | undefined, digits = 1): string {
   return isNum(x) ? `${fixed(x, digits)} d` : DASH

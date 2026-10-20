@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
   assumptionLines,
-  benchmarkName,
+  benchmarkLabels,
+  blockLengthLabel,
   calendarGrid,
   configLabel,
   costSweepView,
   divergingColor,
   fanRows,
+  fmtDelta,
   firstOosIndex,
   foldBands,
   heatmapBound,
   heatmapLayout,
   histogramRows,
+  legRows,
   lookbackLabel,
   niceTicks,
   NULL_CELL,
@@ -25,7 +28,9 @@ import type {
   CalendarReturns,
   CostSensitivity,
   Fold,
+  LegSeries,
   ModelResult,
+  MonteCarloResponse,
   ResolvedBacktestRun,
   SensitivityResponse,
   Series,
@@ -51,8 +56,25 @@ function makeSeries(overrides: Partial<Series> = {}): Series {
     is_oos: [false, false, false, false, true, true],
     rolling_sharpe: [null, null, null, null, 0.8, 0.75],
     rolling_beta: [null, null, null, null, 0.1, 0.12],
+    legs: null,
     ...overrides,
   }
+}
+
+function leg(ticker: string, overrides: Partial<LegSeries> = {}): LegSeries {
+  return {
+    ticker,
+    score: [null, null, 0.05, 0.04, -0.01, -0.02],
+    position: [0, 0, 0, 1, 1, -1],
+    weight: [0, 0, 0.25, 0.25, -0.2, -0.2],
+    vol_forecast: [null, 0.2, 0.21, 0.19, 0.18, 0.2],
+    ...overrides,
+  }
+}
+
+/** A trend-portfolio series: no top-level score, one entry per leg in `legs`. */
+function portfolioSeries(legs: LegSeries[]): Series {
+  return makeSeries({ score: null, legs, position: [0, 0, 1, 1, 1, 1] })
 }
 
 function trade(overrides: Partial<Trade>): Trade {
@@ -68,6 +90,7 @@ function trade(overrides: Partial<Trade>): Trade {
     holding_days: 2,
     pnl: 0.01,
     beta_at_entry: null,
+    ticker: null,
     ...overrides,
   }
 }
@@ -144,13 +167,69 @@ describe('seriesRows: the shared rows of every synchronized chart (§13)', () =>
     expect(firstOosIndex(makeSeries().is_oos)).toBe(4)
     expect(firstOosIndex([false, false, false])).toBe(-1)
   })
+
+  it('a trend portfolio has no top-level score: null scores, and its markers go on the legs', () => {
+    const series = portfolioSeries([leg('SPY'), leg('GLD')])
+    const { rows, unplacedMarkers } = seriesRows(series, [trade({ ticker: 'SPY', signal_date: '2020-01-06' })])
+    expect(rows.every((r) => r.score === null)).toBe(true)
+    expect(rows.every((r) => r.entryLong === null && r.entryShort === null && r.exit === null)).toBe(true)
+    expect(unplacedMarkers).toBe(0)
+    expect(() => seriesRows(portfolioSeries([leg('SPY', { weight: [0, 1] })]), [])).toThrow(/different lengths/)
+  })
+})
+
+describe('legRows: the trend portfolio’s per-leg charts (§13, view 3)', () => {
+  it('keeps one row per date for every leg, in the request’s order', () => {
+    const spy = leg('SPY')
+    const gld = leg('GLD', { score: [null, null, -0.1, -0.12, -0.08, 0.02], weight: [0, 0, -0.5, -0.5, -0.5, 0.4] })
+    const { legs } = legRows(portfolioSeries([spy, gld]), [])
+    expect(legs.map((l) => l.ticker)).toEqual(['SPY', 'GLD'])
+    expect(legs[1].rows.map((r) => r.date)).toEqual(makeSeries().dates)
+    expect(legs[1].rows.map((r) => r.score)).toEqual(gld.score)
+    expect(legs[1].weight).toEqual(gld.weight)
+    expect(legs[0].volForecast).toEqual(spy.vol_forecast)
+  })
+
+  it('puts each trade’s markers on its own leg only', () => {
+    const trades = [
+      trade({ id: 1, ticker: 'SPY', side: 'long', signal_date: '2020-01-03', exit_signal_date: '2020-01-07' }),
+      trade({ id: 2, ticker: 'GLD', side: 'short', signal_date: '2020-01-06', exit_signal_date: null, open: true }),
+    ]
+    const { legs, unplacedMarkers } = legRows(portfolioSeries([leg('SPY'), leg('GLD')]), trades)
+    const marked = (i: number) =>
+      legs[i].rows.filter((r) => r.entryLong !== null || r.entryShort !== null || r.exit !== null).map((r) => r.date)
+    expect(marked(0)).toEqual(['2020-01-03', '2020-01-07'])
+    expect(marked(1)).toEqual(['2020-01-06'])
+    expect(legs[0].rows[1].entryLong).toBe(0) // a null score (warm-up) puts the marker at 0
+    expect(legs[0].rows[3].exit).toBe(0.04)
+    expect(legs[1].rows[2].entryShort).toBe(0.05)
+    expect(unplacedMarkers).toBe(0)
+    const outside = legRows(portfolioSeries([leg('SPY')]), [trade({ ticker: 'SPY', signal_date: '2019-12-31' })])
+    expect(outside.unplacedMarkers).toBe(1)
+  })
+
+  it('is empty for the other strategies, and rejects a leg of the wrong length', () => {
+    expect(legRows(makeSeries(), [trade({})])).toEqual({ legs: [], unplacedMarkers: 0 })
+    expect(() => legRows(portfolioSeries([leg('SPY', { vol_forecast: [0.1] })]), [])).toThrow(/SPY leg/)
+  })
 })
 
 describe('labels', () => {
-  it('benchmarks A and C on the traded ticker and pairs on SPY (§6.4)', () => {
-    expect(benchmarkName('mean_reversion', ['KO'])).toBe('KO')
-    expect(benchmarkName('trend', ['GLD'])).toBe('GLD')
-    expect(benchmarkName('pairs', ['KO', 'PEP'])).toBe('SPY')
+  it('benchmarks A and C on the traded ticker, pairs on SPY and the portfolio on its basket (§6.4)', () => {
+    expect(benchmarkLabels('mean_reversion', ['KO'])).toEqual({
+      name: 'Buy & hold KO',
+      phrase: 'buy & hold KO', // the ticker keeps its case inside a sentence
+      short: 'B&H KO',
+      tag: 'B&H',
+    })
+    expect(benchmarkLabels('trend', ['GLD']).name).toBe('Buy & hold GLD')
+    expect(benchmarkLabels('pairs', ['KO', 'PEP']).short).toBe('B&H SPY')
+    expect(benchmarkLabels('trend_portfolio', ['SPY', 'GLD'])).toEqual({
+      name: 'Equal-weight basket',
+      phrase: 'equal-weight basket',
+      short: 'EW basket',
+      tag: 'EW',
+    })
   })
 
   const dates = { first_evaluated_date: '2015-04-01', split_date: '2022-08-05', end: '2025-12-31' }
@@ -202,6 +281,53 @@ describe('labels', () => {
     ])
     const pairs = assumptionLines({ ...resolved, strategy: 'pairs' })
     expect(pairs[2]).toBe('Shorting: required (a pair always holds a short leg)')
+  })
+
+  it('states the pairs model, and the trend portfolio’s per-asset sizing (Phase 7)', () => {
+    const base = {
+      strategy: 'pairs',
+      tickers: ['KO', 'PEP'],
+      L: 60,
+      cost_bps: 10,
+      borrow_bps: 0,
+      allow_short: true,
+      execution_lag: 1,
+      rf_source: '13-week T-bill (^IRX)',
+      pairs_model: 'ols',
+      kalman_delta: null,
+      vol_target: null,
+      vol_halflife: null,
+      vol_refresh: null,
+      max_leverage: null,
+    } as ResolvedBacktestRun
+    expect(assumptionLines(base).at(-2)).toBe('Pairs model: rolling OLS over 60 days')
+    expect(assumptionLines({ ...base, pairs_model: 'kalman', kalman_delta: 1e-6 }).at(-2)).toBe(
+      'Pairs model: Kalman filter, δ = 1e-6, started from an OLS fit on the first 60 days',
+    )
+    expect([fmtDelta(1e-6), fmtDelta(0.00025), fmtDelta(1e-2), fmtDelta(null)]).toEqual(['1e-6', '2.5e-4', '1e-2', '—'])
+    const portfolio = assumptionLines({
+      ...base,
+      strategy: 'trend_portfolio',
+      tickers: ['SPY', 'QQQ', 'GLD', 'TLT'],
+      L: 252,
+      pairs_model: null,
+      vol_target: 0.4,
+      vol_halflife: 42,
+      vol_refresh: 'weekly',
+      max_leverage: 2,
+    })
+    expect(portfolio.some((line) => line.startsWith('Pairs model'))).toBe(false)
+    expect(portfolio.at(-1)).toBe(
+      'Vol targeting: always on, 40% a year per asset, 42-day EWMA half-life, weekly refresh, each leg at most 2.0× / 4 (gross at most 2.0×)',
+    )
+  })
+
+  it('names the block lengths a Monte Carlo run used (§10.8)', () => {
+    const resolved = (block_len: number | 'auto', circular: number, stationary: number) =>
+      ({ block_len, block_len_used: { circular, stationary } }) as MonteCarloResponse['resolved']
+    expect(blockLengthLabel(resolved(10, 10, 10))).toBe("10 days (the stationary bootstrap's mean)")
+    expect(blockLengthLabel(resolved(1, 1, 1))).toBe("1 day (the stationary bootstrap's mean)")
+    expect(blockLengthLabel(resolved('auto', 9, 8))).toBe('auto: 9 days circular, mean 8 days stationary')
   })
 })
 

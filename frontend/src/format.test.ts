@@ -3,6 +3,7 @@ import {
   DASH,
   fmtBps,
   fmtCI,
+  fmtDayCount,
   fmtDays,
   fmtInt,
   fmtLag,
@@ -149,5 +150,11 @@ describe('fmtPerYear', () => {
     expect(fmtPerYear(0.0198)).toBe('1.98%/yr')
     expect(fmtPerYear(0)).toBe('0.00%/yr')
     expect(fmtPerYear(null)).toBe(DASH)
+  })
+})
+
+describe('fmtDayCount', () => {
+  it('pluralizes a whole number of days', () => {
+    expect([fmtDayCount(1), fmtDayCount(0), fmtDayCount(10)]).toEqual(['1 day', '0 days', '10 days'])
   })
 })

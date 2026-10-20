@@ -160,7 +160,8 @@ def walk_forward(request: WalkForwardRequest, session: SessionDep) -> dict[str, 
 
 @app.post("/api/monte-carlo", response_model=MonteCarloResponse)
 def run_monte_carlo(request: MonteCarloRequest, session: SessionDep) -> dict[str, Any]:
-    """GBM and block-bootstrap projections of a strategy's or a ticker's daily returns (§10). Not stored."""
+    """GBM, block-bootstrap and stationary-bootstrap projections of a strategy's or a ticker's daily
+    returns (§10). Not stored."""
     if request.source == "strategy":
         bt = request.backtest
         market = data_loader.load_market(session, bt.tickers, bt.start, bt.end, bt.risk_free)

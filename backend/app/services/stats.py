@@ -1,7 +1,9 @@
-"""Pairs diagnostics (§5.4) and the deflated Sharpe ratio (§9.1). Pure (§0, rule 8).
+"""Pairs diagnostics (§5.4), the Kalman-filter hedge ratio (§5.7) and the deflated Sharpe ratio
+(§9.1). Pure (§0, rule 8).
 
 Engle–Granger test, static OLS and half-life: the inputs are log prices on the run calendar,
 and the results are only displayed; no trading decision uses them.
+Kalman filter: the inputs are rebased log prices; the value at t uses data through the close of t.
 Deflated Sharpe ratio: the inputs are daily excess returns and daily (not annualized) Sharpe
 ratios.
 """
@@ -20,6 +22,7 @@ from statsmodels.tools.sm_exceptions import CollinearityWarning
 from statsmodels.tsa.stattools import coint
 
 VAR_FLOOR = 1e-12  # same floor as the rolling beta (§5.3)
+RESID_VAR_RATIO = 1e-8  # §5.3's collinearity threshold, reused for the Kalman R (§5.7)
 EULER_GAMMA = 0.5772156649  # the Euler–Mascheroni constant, to the digits §9.1 gives
 SHARPE_VAR_FLOOR = 1e-24  # §9.1: below this, the trials' Sharpe ratios are all the same
 STD_FLOOR = 1e-12  # the §8 Sharpe is undefined below this std
@@ -118,6 +121,105 @@ def pairs_diagnostics(
         collinear_is=eg_is.collinear,
         collinear_oos=eg_oos.collinear,
     )
+
+
+# ---------------------------------------------------------------- Kalman-filter hedge ratio (§5.7)
+
+
+@dataclass(frozen=True)
+class KalmanFilterResult:
+    """The §5.7 filter on positions 0..n-1; every array is NaN for t < L, or everywhere when the
+    model is undefined (a flat-x or exactly collinear warm-up window).
+
+    z: the standardized innovation e_t / sqrt(S_t). Its prediction uses data through t - 1.
+    alpha, beta: the filtered state (alpha_t, beta_t), using data through the close of t.
+    R: the observation-noise variance estimated on days 0..L-1; None when undefined.
+    cov: the filtered state covariance P_t as an (n, 2, 2) array, only with keep_cov=True.
+    """
+
+    z: np.ndarray
+    alpha: np.ndarray
+    beta: np.ndarray
+    R: float | None
+    cov: np.ndarray | None
+
+
+def kalman_filter(
+    y: object, x: object, L: int, delta: float, *, keep_cov: bool = False
+) -> KalmanFilterResult:
+    """Kalman filter for a random-walk regression y_t = alpha_t + beta_t * x_t + e_t (§5.7, Chan 2013).
+
+    Args:
+        y, x: rebased log prices (y = ln(Y / Y_0), x = ln(X / X_0)) on the run calendar.
+        L: initialization window: days 0..L-1 seed the state with their OLS fit. L >= 3.
+        delta: state-noise parameter; the state moves by w_t ~ N(0, q I) with q = delta / (1 - delta).
+            delta = 0 reproduces expanding-window OLS.
+        keep_cov: also return the filtered covariance P_t of every day (for tests).
+
+    The initialization is the posterior of a flat prior after days 0..L-1: s = OLS of y on (1, x),
+    R = SSR / (L - 2), P = R (H'H)^-1. Then, for t = L..n-1: predict P + q I, innovation
+    e = y_t - h s with h = (1, x_t), S = h P h' + R, z_t = e / sqrt(S), and the Joseph-form update,
+    which keeps P symmetric positive definite. The recursion is unrolled into scalar arithmetic
+    on the 2x2 matrices; it matches the matrix form within 1e-12 (§12).
+    """
+    yv, xv = np.asarray(y, dtype=float), np.asarray(x, dtype=float)
+    n = yv.size
+    if xv.size != n:
+        raise ValueError("y and x must have the same length")
+    if L < 3:
+        raise ValueError(f"L must be >= 3 (R divides by L - 2), got {L}")
+    if not 0 <= delta < 1:
+        raise ValueError(f"delta must be in [0, 1), got {delta}")
+    z, alpha, beta = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    cov = np.full((n, 2, 2), np.nan) if keep_cov else None
+    if n <= L:
+        return KalmanFilterResult(z=z, alpha=alpha, beta=beta, R=None, cov=cov)
+
+    # Initialization from days 0..L-1, with centred sums for accuracy.
+    yw, xw = yv[:L], xv[:L]
+    x_bar, y_bar = float(xw.mean()), float(yw.mean())
+    xd, yd = xw - x_bar, yw - y_bar
+    sxx, syy = float(xd @ xd), float(yd @ yd)
+    if not sxx / (L - 1) > VAR_FLOOR:  # a flat-x window: H'H is singular in exact arithmetic
+        return KalmanFilterResult(z=z, alpha=alpha, beta=beta, R=None, cov=cov)
+    b = float(xd @ yd) / sxx
+    a = y_bar - b * x_bar
+    resid = yw - a - b * xw
+    R = float(resid @ resid) / (L - 2)
+    if not R > RESID_VAR_RATIO * (syy / (L - 1)):  # exactly collinear legs
+        return KalmanFilterResult(z=z, alpha=alpha, beta=beta, R=None, cov=cov)
+    # P = R (H'H)^-1, written out: the OLS covariance of (alpha, beta).
+    p00, p01, p11 = R * (1.0 / L + x_bar * x_bar / sxx), -R * x_bar / sxx, R / sxx
+
+    q = delta / (1.0 - delta)
+    xs, ys = xv.tolist(), yv.tolist()
+    sqrt = math.sqrt
+    for t in range(L, n):
+        xt = xs[t]
+        p00 += q  # predict: the state mean is unchanged
+        p11 += q
+        e = ys[t] - (a + b * xt)  # innovation: the prediction uses data through t - 1
+        g0 = p00 + p01 * xt  # P h
+        g1 = p01 + p11 * xt
+        S = g0 + g1 * xt + R  # h P h' + R
+        z[t] = e / sqrt(S)
+        k0, k1 = g0 / S, g1 / S  # gain K = P h / S
+        a += k0 * e
+        b += k1 * e
+        # Joseph form P = A P A' + R K K' with A = I - K h, h = (1, xt).
+        m00, m01 = 1.0 - k0, -k0 * xt
+        m10, m11 = -k1, 1.0 - k1 * xt
+        ap00 = m00 * p00 + m01 * p01
+        ap01 = m00 * p01 + m01 * p11
+        ap10 = m10 * p00 + m11 * p01
+        ap11 = m10 * p01 + m11 * p11
+        p00 = ap00 * m00 + ap01 * m01 + R * k0 * k0
+        p01 = ap00 * m10 + ap01 * m11 + R * k0 * k1
+        p11 = ap10 * m10 + ap11 * m11 + R * k1 * k1
+        alpha[t], beta[t] = a, b
+        if cov is not None:
+            cov[t] = ((p00, p01), (p01, p11))
+    return KalmanFilterResult(z=z, alpha=alpha, beta=beta, R=R, cov=cov)
 
 
 # ---------------------------------------------------------------- deflated Sharpe ratio (§9.1)

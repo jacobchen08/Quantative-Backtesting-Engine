@@ -1,4 +1,5 @@
 -r requirements.txt
 pytest==9.1.1
+pytest-xdist==3.8.0  # runs the suite on every core: one process takes over the 60 s budget (CLAUDE.md section 12)
 ruff==0.17.1
 httpx2==2.13.1  # required by fastapi.testclient.TestClient (Starlette 1.8 deprecates httpx)

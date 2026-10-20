@@ -7,7 +7,9 @@ Python and library versions, then:
 - the default walk-forward on the same pair, as a request and as run_walk_forward alone;
 - the same backtest repeated with only z_entry or only L changed, the case the diagnostics
   cache (§14) is for;
-- the Monte Carlo time per model, and the peak memory of one run at the API caps.
+- the Kalman pairs model (§5.7) on the same pair, and a ten-ETF trend portfolio (§5.8);
+- the Monte Carlo time per model, with a fixed and an automatic block length, and the peak
+  memory of one run at the API caps.
 
 Run it from backend\ in PowerShell:
 
@@ -15,9 +17,9 @@ Run it from backend\ in PowerShell:
     .venv\Scripts\python.exe scripts\bench.py --repeats 30
 
 It keeps its own SQLite price cache, backend\bench.db (git-ignored), so it never touches the
-app's database or its run history. The first run downloads KO, PEP, SPY and ^IRX from Yahoo
-Finance; after that every request must be served from the cache, and the bench stops if one
-reaches the network.
+app's database or its run history. The first run downloads KO, PEP, SPY, ^IRX and the trend
+portfolio's ETFs from Yahoo Finance; after that every request must be served from the cache,
+and the bench stops if one reaches the network.
 
 Requests go through FastAPI's TestClient, in process. The times include request validation,
 the engine, storing the run, response validation and JSON encoding, but no network or browser.
@@ -62,6 +64,9 @@ PAIR = ["KO", "PEP"]
 START, END = "2011-01-01", "2025-12-31"  # 15 calendar years
 SEED = 20261016
 BACKTEST = {"strategy": "pairs", "tickers": PAIR, "start": START, "end": END}  # every other field default
+KALMAN = {**BACKTEST, "pairs_model": "kalman"}  # the default delta, 1e-6
+DIVERSIFIED = ["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "IEF", "GLD", "DBC", "VNQ"]  # the §13 preset
+PORTFOLIO = {"strategy": "trend_portfolio", "tickers": DIVERSIFIED, "start": START, "end": END}
 MONTE_CARLO = {"source": "strategy", "backtest": BACKTEST, "seed": SEED}  # 10,000 paths x 252 days
 CAPS = {"n_paths": 50_000, "horizon": 253}  # n_paths x (horizon + 1) = 12,700,000, the API cap
 # The L sweep: every 4th L from 20 to 252, skipping the default 60. Under the default split the split
@@ -69,7 +74,17 @@ CAPS = {"n_paths": 50_000, "horizon": 253}  # n_paths x (horizon + 1) = 12,700,0
 # request in the sweep misses the diagnostics cache.
 L_SWEEP = [L for L in range(20, 253, 4) if L != 60]
 DEFAULT_REPEATS = 10
-LIBRARIES = ("numpy", "pandas", "scipy", "statsmodels", "fastapi", "starlette", "pydantic", "SQLAlchemy")
+LIBRARIES = (
+    "numpy",
+    "pandas",
+    "scipy",
+    "statsmodels",
+    "arch",
+    "fastapi",
+    "starlette",
+    "pydantic",
+    "SQLAlchemy",
+)
 
 
 # ---------------------------------------------------------------- machine description
@@ -324,8 +339,20 @@ def walk_forward_alone(factory: sessionmaker[Session], repeats: int) -> tuple[li
     return times, shape
 
 
+def run_strategy_alone(factory: sessionmaker[Session], body: dict, repeats: int) -> list[float]:
+    """pipeline.run_strategy on loaded data, without the report or serialization."""
+    request = BacktestRequest.model_validate(body)
+    with factory() as session:
+        market = data_loader.load_market(
+            session, request.tickers, request.start, request.end, request.risk_free
+        )
+    params = request.to_params()
+    return repeat(lambda: pipeline.run_strategy(market.prices, market.rf, params), repeats)
+
+
 def monte_carlo_peak_mb(factory: sessionmaker[Session]) -> float:
-    """Peak traced memory (MB, 10^6 bytes) of one simulate() call at the API caps (§10.6, §14).
+    """Peak traced memory (MB, 10^6 bytes) of one simulate() call at the API caps (§10.6, §14),
+    with all three models.
 
     tracemalloc sees numpy's buffers, so this is the arrays' peak, not the process's RSS.
     """
@@ -344,6 +371,25 @@ def monte_carlo_peak_mb(factory: sessionmaker[Session]) -> float:
     finally:
         tracemalloc.stop()
     return peak / 1e6
+
+
+def monte_carlo_runs(
+    client: TestClient, body: dict, repeats: int
+) -> tuple[list[float], dict[str, list[float]], dict]:
+    """The Monte Carlo request timed end to end, simulate()'s own timers, and the last response."""
+    request_times: list[float] = []
+    inside: dict[str, list[float]] = {"total": [], "gbm": [], "bootstrap": [], "stationary": []}
+    out: dict = {}
+    gc.collect()
+    for i in range(repeats + 1):  # the first run is the warm-up
+        elapsed, response = timed(post, client, "/api/monte-carlo", body)
+        if i > 0:
+            out = response.json()
+            request_times.append(elapsed)
+            inside["total"].append(out["elapsed_ms_total"])
+            for model in ("gbm", "bootstrap", "stationary"):
+                inside[model].append(out[model]["elapsed_ms"])
+    return request_times, inside, out
 
 
 # ---------------------------------------------------------------- main
@@ -367,6 +413,7 @@ def main() -> None:
     data_loader.fetch_from_yahoo = guard
     client, factory = bench_client()
     first = post(client, "/api/backtest", BACKTEST).json()  # downloads into bench.db on the first run only
+    portfolio_first = post(client, "/api/backtest", PORTFOLIO).json()  # likewise, for the ten ETFs
     guard.armed = True
     split_date = first["resolved"]["split_date"]
     print(f"Measuring ({repeats} runs per workload)...", file=sys.stderr)
@@ -391,19 +438,19 @@ def main() -> None:
     sensitivity = repeat(lambda: post(client, "/api/sensitivity", BACKTEST), repeats)
     walk_forward = repeat(lambda: post(client, "/api/walk-forward", BACKTEST), repeats)
     walk_forward_core, wf_shape = walk_forward_alone(factory, repeats)
-    mc_request: list[float] = []
-    inside: dict[str, list[float]] = {"total": [], "gbm": [], "bootstrap": []}  # simulate()'s own timers
-    gc.collect()
-    for i in range(repeats + 1):  # the first run is the warm-up
-        elapsed, response = timed(post, client, "/api/monte-carlo", MONTE_CARLO)
-        if i > 0:
-            out = response.json()
-            mc_request.append(elapsed)
-            inside["total"].append(out["elapsed_ms_total"])
-            inside["gbm"].append(out["gbm"]["elapsed_ms"])
-            inside["bootstrap"].append(out["bootstrap"]["elapsed_ms"])
+    kalman = repeat(lambda: post(client, "/api/backtest", KALMAN), repeats, before=diagnostics_cache.clear)
+    run_ols = run_strategy_alone(factory, BACKTEST, repeats)
+    run_kalman = run_strategy_alone(factory, KALMAN, repeats)
+    portfolio = repeat(lambda: post(client, "/api/backtest", PORTFOLIO), repeats)
+    run_portfolio = run_strategy_alone(factory, PORTFOLIO, repeats)
+    mc_request, inside, _ = monte_carlo_runs(client, MONTE_CARLO, repeats)
+    two_models = [g + b for g, b in zip(inside["gbm"], inside["bootstrap"], strict=True)]
+    mc_auto, inside_auto, auto_out = monte_carlo_runs(client, {**MONTE_CARLO, "block_len": "auto"}, repeats)
+    auto_used = auto_out["resolved"]["block_len_used"]
     peak_mb = monte_carlo_peak_mb(factory)
     path_mb = CAPS["n_paths"] * (CAPS["horizon"] + 1) * 8 / 1e6
+    p_res = portfolio_first["resolved"]
+    p_days = len(portfolio_first["series"]["dates"])
 
     stage_rows = [
         ("Load prices and rf from the cache", stages["load"]),
@@ -431,8 +478,16 @@ def main() -> None:
         row("15-year pairs backtest, z_entry changed (diagnostics cached)", iteration[0][1][0], 300),
         row("Default sensitivity grid (20 configurations)", sensitivity, 5000),
         row("Default walk-forward, 15-year pairs (20 configurations)", walk_forward, 8000),
-        row("Default Monte Carlo, 10,000 x 252, both models: the request", mc_request, 1000),
-        row("Default Monte Carlo: the simulation alone (elapsed_ms_total)", inside["total"], 1000),
+        row(
+            "Default Monte Carlo, 10,000 x 252: GBM and block bootstrap (their elapsed_ms)", two_models, 1000
+        ),
+        row("Default Monte Carlo, three models: the request", mc_request, 1500),
+        row(
+            "Default Monte Carlo, three models: the simulation alone (elapsed_ms_total)",
+            inside["total"],
+            1500,
+        ),
+        row("15-year Kalman pairs backtest, first request on the data (diagnostics computed)", kalman, 500),
         "",
         "## Pairs backtest by stage (first request on the data)",
         "",
@@ -460,14 +515,32 @@ def main() -> None:
         f"{wf_shape['folds']} folds: {wf_shape['days']:,} out-of-sample days, on which "
         f"{wf_shape['distinct']} distinct configurations were chosen.",
         "",
+        "## Kalman pairs and the trend portfolio",
+        "",
+        *table("Workload", "Median", "Min", "Max"),
+        row("run_strategy, rolling OLS (the default pairs model)", run_ols),
+        row("run_strategy, Kalman filter (delta 1e-6)", run_kalman),
+        row(f"Trend portfolio of {len(DIVERSIFIED)} ETFs: the request", portfolio),
+        row(f"Trend portfolio of {len(DIVERSIFIED)} ETFs: run_strategy alone", run_portfolio),
+        "",
+        f"The trend portfolio ({', '.join(DIVERSIFIED)}; L = {p_res['L']}, a {p_res['vol_target']:.0%} "
+        f"target per asset) runs on the intersection of their calendars: {p_days:,} series days from "
+        f"{portfolio_first['series']['dates'][0]}, {len(portfolio_first['trades']):,} leg trades.",
+        "",
         "## Monte Carlo",
         "",
         *table("Model (time inside the default request)", "Median", "Min", "Max"),
         row("GBM", inside["gbm"]),
         row("Circular block bootstrap (block length 10)", inside["bootstrap"]),
+        row("Stationary bootstrap (mean block length 10)", inside["stationary"]),
+        row('The request with block_len "auto"', mc_auto),
+        row('The simulation alone with block_len "auto" (elapsed_ms_total)', inside_auto["total"]),
         "",
-        f"Peak traced memory at the API caps ({CAPS['n_paths']:,} paths x {CAPS['horizon']} days): "
-        f"{peak_mb:.0f} MB, {peak_mb / path_mb:.2f}x the {path_mb:.0f} MB path array "
+        f'With block_len "auto" the block lengths were {auto_used["circular"]} (circular) and '
+        f"{auto_used['stationary']} (stationary).",
+        "",
+        f"Peak traced memory at the API caps ({CAPS['n_paths']:,} paths x {CAPS['horizon']} days, three "
+        f"models): {peak_mb:.0f} MB, {peak_mb / path_mb:.2f}x the {path_mb:.0f} MB path array "
         "(tracemalloc, which sees numpy's buffers).",
         "",
         r"Measured with: .venv\Scripts\python.exe scripts\bench.py"

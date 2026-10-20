@@ -1,8 +1,8 @@
 # Methodology
 
-Why the engine computes what it computes, what it can't tell you, and every approved departure from the specification, [CLAUDE.md](../CLAUDE.md) (§15). Section signs (§) refer to CLAUDE.md. This covers everything built through Phase 5; Phases 6–9 add their own sections as they land.
+Why the engine computes what it computes, what it can't tell you, and every approved departure from the specification, [CLAUDE.md](../CLAUDE.md) (§15). Section signs (§) refer to CLAUDE.md. This covers everything built through Phase 7; Phases 8 and 9 add their own sections as they land.
 
-**Measured figures.** A figure marked *(engine)* was measured on 2026-10-16 (Phases 0–4) or 2026-10-17 (Phase 5) with this code, through the same loader and pipeline as `/api/backtest`, on Yahoo Finance data cached that day. Each comes with the request that reproduces it; fields not shown are the defaults (10 bps one-way, k = 1, ^IRX). Timings come only from `scripts/bench.py` (see the README).
+**Measured figures.** A figure marked *(engine)* was measured on 2026-10-16 (Phases 0–4), 2026-10-17 (Phases 5 and 6) or 2026-10-19 (Phase 7) with this code, through the same loader and pipeline as `/api/backtest`, on Yahoo Finance data cached that day. Each comes with the request that reproduces it; fields not shown are the defaults (10 bps one-way, k = 1, ^IRX). Timings come only from `scripts/bench.py` (see the README).
 
 ## Justifications
 
@@ -22,7 +22,7 @@ A signal s_t may use data through the close of day t. The executed position is p
 - **k = 1 (default) fills at the next day's close.** The close that produced the signal is only known once the market has closed, so trading at that close needs an order sent before seeing the price. k = 0 is offered as the optimistic bound.
 - **The lag is applied once, in the backtester.** Strategies return unshifted signals. A second shift would silently add a day of lag; a missing one would be look-ahead.
 - **The last k signals are never executed,** because they would fill after the data ends.
-- **The perturbation test checks this** (§12). Multiplying every price after a date by random noise must leave every score, signal, weight, position and return up to that date bit-identical. It covers every strategy, both hedge modes, both trend frequencies, the vol overlay off and on with each refresh schedule, the long-only switch, a borrow fee, and the walk-forward's stitched series (§26 below).
+- **The perturbation test checks this** (§12). Multiplying every price after a date by random noise must leave every score, signal, weight, position and return up to that date bit-identical. It covers every strategy, both hedge modes, both trend frequencies, the vol overlay off and on with each refresh schedule, the long-only switch, a borrow fee, the walk-forward's stitched series (§26 below), the Kalman pairs model and the trend portfolio, including each leg's score, signal, vol forecast and executed position (§27–28 below).
 
 ### 3. Data (§4)
 - **Only final bars are cached:** those dated before `today_ny()`. During market hours Yahoo serves a partial bar for today, and caching it would freeze an intraday price as a close.
@@ -226,6 +226,7 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 ### 14. Benchmarks (§6.4)
 - **Mean reversion and trend** are compared with buy-and-hold of the same ticker. The question is whether timing the asset beat owning it.
 - **Pairs** are roughly market-neutral and are compared with SPY: the return given up by holding the pair instead of the market.
+- **The trend portfolio** is compared with an equal-weight, daily-rebalanced, long-only basket of its own legs (§28 below): the same assets owned without the trend signals or the vol scaling.
 - **Benchmarks are the tougher comparison.** They use the same evaluated window, rebased to E₀, fully invested (w = 1, no cash) and with no costs.
 
 ### 15. Trades (§7)
@@ -243,6 +244,7 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - `exit_date` is the last day the trade is held into: the day its exit order fills. The last day it appears in `trade_id` is the day before.
   - A trade entered on the final day is open, with 0 holding days and a P&L equal to its entry cost.
   - `signal_date` and `exit_signal_date` are k trading days before entry and exit. That is where the dashboard draws the markers, on the score that triggered them.
+- **The trend portfolio's trades are per leg** (§7.4), with the same rules applied to each leg's own exposure (§28 below).
 
 ### 16. Metrics (§8)
 - **Excess returns for the risk-adjusted ratios, total returns for the account.** Sharpe, Sortino and beta measure return above cash per unit of risk. Total return, CAGR, volatility and drawdown describe the account itself.
@@ -265,7 +267,7 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - a non-positive hedge ratio at entry: the "hedge" adds exposure instead of offsetting it;
   - the data problems of §4.4;
   - ruin;
-  - a leverage cap that binds on more than a quarter of invested days;
+  - a leverage cap that binds on more than a quarter of invested days (of invested asset-days, against each leg's cap, for the trend portfolio);
   - a full-period break-even cost below twice the request's cost (§23 below).
 
 ### 17. Parameter sensitivity (§9)
@@ -294,10 +296,10 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - Longer blocks keep more dependence but leave fewer independent blocks per path. The default of 10 days keeps two weeks of dependence, while a one-year path still combines about 25 independent blocks.
 - **Memory.** Each model's paths are built in place in one (T + 1) × N array. The bootstrap builds its indices as int64 and uses `np.take(..., mode="wrap")`, which avoids copying the indices and buffering the output (§10.3). At the API caps, the bench measured a peak of 216 MB, 2.13 times the 102 MB path array (README).
 - **Outputs (§10.4):**
-  - **Draw order is fixed:** GBM increments, GBM sample paths, bootstrap increments, then bootstrap sample paths. A seed reproduces every output, and a model added later (Phase 7) draws last, so it doesn't change the existing ones.
+  - **Draw order is fixed:** GBM increments, GBM sample paths, bootstrap increments, then bootstrap sample paths, and from Phase 7 the stationary bootstrap's increments and sample paths (§29 below). A seed reproduces every output, and the model added later draws last, so it doesn't change the existing ones (tested).
   - **Bands** are quantiles of the log paths, exponentiated. Quantiles commute with any increasing function, so this equals the quantiles of the equity multiples, apart from the linear interpolation between neighbouring paths. `overwrite_input=True` avoids copying the array.
   - **VaR and CVaR** are positive loss fractions of the terminal return: VaR_α = −Q_{1−α}, and CVaR_α = −mean(terminal | terminal ≤ Q_{1−α}), the average loss in the worst 1 − α of outcomes. Unlike VaR, CVaR is coherent (subadditive), and it measures the tail that VaR only marks the start of.
-  - **The histogram's 50 bins are shared by both models,** with edges at the pooled 0.1% and 99.9% quantiles, so the two distributions compare bar by bar. Values beyond the edges go into the end bins, because `np.histogram` silently drops them, and those values are the tail the chart exists to show. Each model's counts sum to N.
+  - **The histogram's 50 bins are shared by every model** (three from Phase 7), with edges at the pooled 0.1% and 99.9% quantiles, so the distributions compare bar by bar. Pooling the third model moves the edges, so a seed's counts differ from Phase 6's, while its paths, bands and risk figures don't. Values beyond the edges go into the end bins, because `np.histogram` silently drops them, and those values are the tail the chart exists to show. Each model's counts sum to N.
 - **Closed form (§10.5).** Under GBM the terminal log return is X ~ N(m, s²), with m = μ̂T and s = σ̂√T.
   - With p = 1 − α and q = m + sΦ⁻¹(p), the loss 1 − e^X exceeds 1 − e^q with probability p, so VaR_α = 1 − e^q.
   - For CVaR, the partial expectation of a lognormal (complete the square in the normal integral) is E[e^X; X ≤ q] = e^{m + s²/2} Φ((q − m − s²)/s). So
@@ -311,7 +313,8 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **Handlers are plain `def`.** The work is CPU-bound and yfinance blocks. FastAPI runs `def` handlers in a thread pool, whereas blocking inside an `async def` would stall every other request.
 - **One error shape,** `{"detail": "..."}`: 422 for invalid input or too little data, 404 for an unknown ticker, and 502 or 503 for upstream failures (Deviations, Phase 2, item 5).
 - **Fields that don't apply are ignored, not rejected,** and echoed as `null`. The dashboard can switch strategies without clearing fields, and the echo shows exactly what ran.
-- **Validation ranges** keep requests inside what the engine is tested on (for example, L from 10 to 252 for mean reversion and pairs, 21 to 504 for trend), and keep Monte Carlo inside its memory budget: n_paths × (horizon + 1) ≤ 12.7 million.
+- **Validation ranges** keep requests inside what the engine is tested on (for example, L from 10 to 252 for mean reversion and pairs, 21 to 504 for trend and the trend portfolio, and δ from 1e-7 to 1e-2 for the Kalman model), and keep Monte Carlo inside its memory budget: n_paths × (horizon + 1) ≤ 12.7 million.
+- **The vol target's range depends on the strategy:** 1–50% a year for the optional overlay, and 5–60% per asset for the trend portfolio, whose target resolves to 40% when it is `null`. The check therefore runs after the strategy is known, in the model validator, rather than as a field constraint.
 
 ### 20. Performance and the diagnostics cache (§14)
 - **Timings come only from `scripts/bench.py`.** It records the hardware and library versions, uses its own database, and stops if a timed request reaches the network. Each figure is the median of 10 runs after a warm-up. Requests go in process through FastAPI's TestClient; the stage breakdown calls each step of the route directly.
@@ -338,6 +341,8 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **Calendar months use the heatmap's diverging scale,** bounded by the largest |monthly return| but at least 2%, so a quiet strategy's months aren't all saturated. Partial periods are hatched.
 - **The walk-forward has its own button,** because it backtests the whole grid. Its result stays when the sidebar changes, marked as stale until the sidebar builds the same request again, so a slow run is never discarded silently.
 - **Alternate test folds are shaded** in the walk-forward chart, so each fold's boundaries are visible, and the tooltip names each day's fold. The fold table marks every change of choice.
+- **The trend portfolio's signal panel has one small score chart per leg,** each with only that leg's trade markers, then the legs' executed weights, the gross exposure against the cap, and one vol-forecast line per leg against the per-asset target. They share the `syncId` with the other charts, and each leg keeps its colour across them.
+- **Benchmark labels name what the benchmark is:** "Buy & hold SPY" for a single asset or a pair, and "Equal-weight basket" for the trend portfolio, in the equity legend, the KPI tiles, the calendar and the walk-forward.
 
 ### 22. Borrow fee and the long-only switch (§5.9, §6.1)
 - **What a short costs.** Shorting means borrowing the shares, and the lender charges an annual fee on their value. The engine charges b basis points a year on the short notional held into each day: borrow_t = (b / 10,000 / 252) · Σ_i max(−w_i,t−1, 0). It accrues daily on the same 252-day basis as rf. The sale proceeds still earn rf (§4 above), so the fee is the only extra cost.
@@ -427,6 +432,94 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
   - SPY trend with a 10% vol target, `{"strategy": "trend", "tickers": ["SPY"], "start": "2006-01-03", "end": "2025-12-31", "vol_target": 0.1}`: 62 folds from 2010-08-02, with every one of the 5 lookbacks chosen at some point. The stitched Sharpe ratio was 0.23, against 0.49 for L 252 held fixed and 0.80 for buy-and-hold.
 - **Why it remedies OOS reuse, and what it can't fix.** Each choice is computed before its test window, so re-running the walk-forward on new data can't leak a test window into its own selection. The grid, the window lengths and the strategy are still chosen by the user, though. Choosing them after seeing a walk-forward result makes it in-sample again (Limitations).
 
+### 27. The Kalman-filter hedge ratio (§5.7)
+- **Why.** Rolling OLS (§8 above) weighs each of the last L days equally and then drops a day abruptly, so β jumps when an unusual day leaves the window, whatever the market is doing. The Kalman filter treats the regression's coefficients as a state that drifts slowly, and old information fades gradually at a rate set by δ instead of through a hard window (Chan 2013).
+- **The model.** The state s_t = (α_t, β_t)ᵀ is a random walk, s_t = s_{t−1} + w_t with w_t ~ N(0, q·I₂), observed through y_t = α_t + β_t x_t + e_t with e_t ~ N(0, R), on the rebased log prices of §8. With q = δ/(1 − δ), δ = 0 is a constant state and larger δ lets β move faster.
+- **The OLS start and the δ = 0 identity.** The filter starts from the OLS fit on days 0…L−1: ŝ = OLS of y on (1, x), R = SSR/(L − 2) and P = R(HᵀH)⁻¹.
+  - That is the posterior of the state after those L days under a flat prior, with R treated as known: N(ŝ, R(HᵀH)⁻¹).
+  - With q = 0 each later step is the recursive least-squares update, which adds one observation to the regression. So the filtered state on day t is OLS on days 0…t. The test checks this against an explicit expanding-window OLS within 1e-8 on 20 sampled days; the prototype measured 4.2e-15 over 1,500 days *(prototype, 2026-10-19)*.
+  - With q > 0, the predict step P + q·I adds uncertainty every day, which down-weights older observations geometrically.
+  - The start is written out in closed form with centred sums (the 2×2 inverse), not with `np.linalg.solve`, and the guards run first. On a constant window, `solve` returned large, meaningless coefficients for the constants 0.0123, 0.1, 0.3 and 1/3, and raised only for an exact 0 *(prototype)*, so it can't serve as the flat-window check (§5.7).
+- **The innovation z-score.** e_t = y_t − (α̂_{t−1} + β̂_{t−1} x_t) is the error of a prediction made with data through t − 1, and S_t = h P hᵀ + R, with P after the predict step, is its variance under the model. Under the model z_t = e_t/√S_t is N(0, 1) and independent across days, so z_entry = 2 keeps the meaning of §6 above: a two-standard-deviation surprise.
+  - **The start-up step biases it in practice.** R comes from an OLS fit that holds the state fixed over days 0…L−1. If the true β drifts during those days, the residuals absorb the drift, R is overstated, and z is too small. On data simulated from the model with a random-walk state from day 0, over 200 seeds for each of eight settings (δ 1e-4 or 1e-5, R 1e-4 or 1e-6, L 60 or 252), the std of z ranged from 0.23 to 1.14. No seed met the §12 bounds (mean within 0.05 of 0, std within 0.05 of 1) in seven of the settings, and 12% did in the eighth *(prototype)*. Given the true R, the std was 0.97–1.13 and 98–100% of seeds met the bounds.
+  - With the state constant over the start-up window, as the OLS start assumes, only the sampling error of the estimated R remains: 80–95% of seeds met the bounds at L = 252, and all 200 at L = 2,000. The §12 test uses that setup (Deviations, Phase 7, item 1).
+- **The Joseph-form update,** P = (I − Kh) P (I − Kh)ᵀ + R KKᵀ, equals the short form (I − Kh) P in exact arithmetic. It is a sum of a congruence and a positive semidefinite term, so it stays symmetric positive definite under rounding. The tests check symmetry and positive eigenvalues on every day.
+- **Speed.** The recursion is unrolled into scalar arithmetic on the 2×2 matrices and matches the matrix form within 1e-12 (§12). The bench puts `run_strategy` at 25.0 ms for 15 years of KO/PEP, against 23.1 ms with rolling OLS (README).
+- **The default δ is 1e-6** (Deviations, Phase 7, item 2). On real data the dispersion of z depends on δ. Too large a δ makes the model expect more drift than there is, so S overstates the actual innovations and z shrinks. Too small a δ does the reverse. Measured *(engine)* on KO/PEP from 2015-01-02 to 2025-12-31, every other setting default, over the evaluated days (from 2015-04-01, or 2015-03-31 for rolling OLS, whose first score comes a day earlier):
+
+  | δ | std of z | Share of days with \|z\| > 2 | Closed trades | Days in market | β range | Sharpe (full) |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1e-4 | 0.35 | 0.3% | 4 | 0.5% | 0.45–0.91 | 0.02 |
+  | 1e-5 | 0.63 | 1.1% | 10 | 2.2% | 0.53–0.96 | −0.08 |
+  | 1e-6 (default) | 1.13 | 7.1% | 19 | 17.4% | 0.53–0.95 | −0.35 |
+  | 1e-7 | 1.88 | 22.9% | 27 | 42.5% | 0.58–1.14 | 0.05 |
+  | rolling OLS, L = 60 | 1.40 | 15.4% | 67 | 42.1% | −0.44–1.97 | −0.28 |
+
+  - Request: `{"strategy": "pairs", "tickers": ["KO", "PEP"], "start": "2015-01-02", "end": "2025-12-31", "pairs_model": "kalman", "kalman_delta": 1e-6}`, with the other δ values, and without the two Kalman fields for rolling OLS.
+  - At 1e-6 the innovations have roughly the spread the model predicts. At the spec's original 1e-4, z almost never reaches 2, and the model makes 4 trades from 2015 to 2025.
+  - δ was chosen on the dispersion of z, which doesn't look at returns, on KO/PEP and on the test pair (std 1.14 there). It is still a parameter chosen on this sample (Limitations). Maximum likelihood on the innovations would be the principled way to estimate it, and isn't implemented.
+- **What it shows.** The filtered β stays between 0.53 and 0.95, while the 60-day rolling β ranges from −0.44 to 1.97 and was ≤ 0 at 3 entries (the §8 warning). The steadier hedge doesn't make the pair profitable: the full-period Sharpe ratio is −0.35, against −0.28 for rolling OLS, and both lose money out of sample.
+- **Everything downstream is §8's,** with the filtered β in place of the rolling one: the entry/exit rule, both hedge modes, the unit weights and the overlay's u. The §5.4 diagnostics test the pair, not the model, so they are unchanged.
+
+### 28. The multi-asset trend portfolio (§5.8)
+- **Why.** Moskowitz, Ooi & Pedersen (2012) traded time-series momentum across 58 instruments, each scaled to the same ex-ante volatility (40% a year), and averaged the positions. One asset's trend signal is weak and noisy: 0.32 on SPY over 20 years (§10 above). Signals on loosely correlated assets diversify, which is where most of the published Sharpe ratio comes from.
+- **Equal risk budgets.** Leg i holds w_i = s_i · min(σ*/σ_i, max_leverage) / N, where σ* is the per-asset target and σ_i the leg's own §11 forecast. Uncapped, each leg's ex-ante volatility is σ*/N, whatever the asset's own volatility, so a bond leg and an equity leg carry the same risk. For N uncorrelated legs the portfolio's volatility is √N · σ*/N = σ*/√N; correlated legs give more.
+  - Tested: with constant-volatility assets (8–30% a year), a constant signal and a cap that never binds, each leg's realized volatility is within 20% of σ*/N after 3 half-lives (§12). The prototype measured 0.981–1.031 times σ*/N over 200 seeds × 4 legs *(prototype)*.
+- **The cap breaks the budgets for calm assets.** Each leg is capped at max_leverage/N, so a leg reaches its share of the target only when σ_i ≥ σ*/max_leverage: 20% under the defaults (40%, 2×). On the diversified preset the legs' median forecasts ran from 5.7% (IEF) to 20.5% (IWM), so the legs sat at their cap on 76% of invested asset-days. At the cap every leg holds 0.2 of equity, whatever its volatility: equal notional rather than equal risk, with the equity legs carrying most of the risk. The original paper had no cap; it levered calm instruments such as bond futures as far as the target required. Measured *(engine)* on the diversified preset, 2016-01-05 to 2025-12-31:
+
+  | Setting | Sharpe (full) | Realized vol | Max drawdown | Asset-days at cap | Average gross exposure |
+  |---|---:|---:|---:|---:|---:|
+  | defaults: 40% per asset, 2× | 0.01 | 15.2% | −36.6% | 76% | 1.90 |
+  | `max_leverage` 4 | 0.04 | 19.3% | −45.8% | 15% | 2.66 |
+  | 10% per asset | 0.04 | 5.0% | −12.3% | 3% | 0.74 |
+  | long-only (`allow_short` false) | 0.45 | 13.8% | −24.7% | 81% | 1.16 |
+  | equal-weight basket (benchmark) | 0.66 | 11.9% | −23.1% | — | 1 |
+
+  - Request: `{"strategy": "trend_portfolio", "tickers": ["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "IEF", "GLD", "DBC", "VNQ"], "start": "2015-01-02", "end": "2025-12-31"}`, then with `"max_leverage": 4`, `"vol_target": 0.1` or `"allow_short": false`. The first evaluated day is 2016-01-05: a 252-day lookback, then the next month start.
+  - The default run has a 95% CI of −0.61 to 0.63 on its Sharpe ratio, 147 closed and 10 open leg trades, and a break-even cost of 12.4 bps, so both the cap and the break-even warnings fire.
+  - The four trend ETFs (SPY, QQQ, GLD, TLT) over the same window: 0.30, against 0.94 for their basket.
+  - Over this decade, shorting the assets whose 12-month trend had turned negative lost money, as on single-asset SPY (§22 above): the long-only portfolio had a Sharpe ratio of 0.45. Ten years of one portfolio is one sample, though, and the CI spans −0.6 to 0.6.
+- **All legs start together.** t₀ is the first date on which every leg's score is valid, and every signal before it is 0. So the portfolio holds its N legs from its first day, each with its 1/N share, and §6.1's "no signal before t₀" check holds for the whole portfolio. A leg with a short history delays everything (Limitations).
+- **The backtester's signal is the "invested" flag,** 1 when any leg's signal is non-zero. §6.1's checks then apply to the portfolio as a whole. Two checks are added for the legs: each leg's weight is exactly 0 where its own signal is flat, and the flag is exactly what the legs imply.
+- **Trades are per leg (§7.4).** The legs enter and exit independently, so a run of same-sign position of the whole portfolio means nothing. §15's identification, attribution and bookkeeping run on each leg's own exposure, return, borrow fee and cost. Every daily term of §6.1 is a sum over legs, so the leg trades together reconcile with the total excess return.
+  - Tested over 54 random portfolios (2–5 legs, lags 0–2, costs, borrow fees, the long-only switch and all three refresh schedules): the trades' P&L sums to the total excess within 1e-9, and a leg's trades never overlap.
+  - Each leg's trades have exactly the dates of that leg backtested alone with its portfolio weights, and the same P&L within 1e-15 (tested).
+  - Ids run 1… across the portfolio by entry date and then ticker, so the trades table reads in time order.
+- **A ruin-day credit is split by gross weight** (Deviations, Phase 7, item 3). §6.2 credits the clipped amount to "the trade held into r", but several legs can be held into r. The credit is the limited-liability floor, not any leg's own P&L, so it is split in proportion to the exposure each leg held into the day, |w_{i,r−1}|. That keeps the reconciliation exact and needs no rule about which leg caused the ruin. The alternative considered, in proportion to each leg's loss that day, needs a rule for legs that gained.
+- **The benchmark** is the portfolio's own assets held long in equal weights, rebalanced daily, with no costs. The comparison then isolates what the trend signals and the vol scaling add to owning the same universe.
+- **Leverage at the cap is counted per asset-day.** `pct_days_at_cap` is the share of invested asset-days (leg i held into day t) on which |w_{i,t−1}| reached max_leverage/N, so its warning says "invested asset-days".
+
+### 29. The stationary bootstrap (§10.7)
+- **Why.** The circular block bootstrap's blocks have a fixed length b, so block boundaries fall at fixed positions in every path: days b and b + 1 are always independent, while days b − 1 and b never are. The resampled series is therefore not stationary. The stationary bootstrap of Politis & Romano (1994) starts a new block with probability p = 1/b each day, so block lengths are geometric with mean b, the boundaries fall at random, and the resampled series is stationary.
+- **Implied dependence.** Conditional on the data, the stationary bootstrap's autocovariance at lag k is (1 − p)^k times the circular sample autocovariance. Its weights decay smoothly and reach well past b: at b = 40, lag 100 still keeps 8% of its autocovariance. The circular block bootstrap keeps lags below b only, with weights falling linearly to 0.
+- **Is it less sensitive to the block length?** Politis & Romano expected the random lengths to make results less sensitive to the exact choice. Here it was the other way round. Measured *(engine)* on SPY from 2015-01-02 to 2025-12-31 (`source: "ticker"`, seed 42, 10,000 paths over 252 days):
+
+  | block_len | 1 | 5 | 10 | 20 | 40 | auto |
+  |---|---:|---:|---:|---:|---:|---:|
+  | VaR95, circular block bootstrap | 16.1% | 14.3% | 14.0% | 14.3% | 13.6% | 14.8% (14 days) |
+  | VaR95, stationary bootstrap | 15.2% | 14.5% | 14.0% | 12.8% | 10.9% | 13.4% (mean 12 days) |
+  | VaR95, GBM (no blocks) | 15.6% | 15.6% | 15.6% | 15.6% | 15.6% | 15.6% |
+
+  - The simulation error of each VaR95 is roughly 0.3 percentage point (the delta-method error of §18 above), so the differences between block lengths are real.
+  - They come from the data: SPY's daily autocorrelations over 2015–2025 sum to −0.13 over lags 1–20 and −0.20 over lags 21–100 *(prototype)*. Longer blocks keep more of that negative dependence, which narrows the spread of 252-day returns, and the stationary bootstrap's long tail of block lengths keeps the most.
+  - A check confirmed both models do what the theory says: on 20,000 paths, each model's standard deviation of the 252-day log return matched its theoretical value within 1% for every block length above (for b = 40: 0.140 for the stationary and 0.149 for the circular bootstrap, against 0.178 with no dependence) *(prototype)*.
+  - Lahiri (1999) shows that, at their best block lengths, the stationary bootstrap's variance estimates are less accurate than the moving-block bootstrap's. The engine reports both, and the gap between them is a rough measure of how much the answer depends on modelling choices.
+- **Vectorized generation.** For a chunk of paths, the engine draws the day's restart flags and a candidate start for every day, then finds, for each day, the row where its block began: last = the running maximum of t over the restart rows. The index is start[last] + (t − last), modulo n. Each path consumes 2T draws, including starts that are never used, which is the price of vectorizing.
+- **The tests (§12).**
+  - Every increment is a historical value, and with ℓ = 0, 1, …, n − 1 every path splits into runs that are contiguous modulo n.
+  - The share of steps that continue the previous index is within 5 binomial standard errors of (1 − p) + p/n. The p/n term counts new blocks that start, by chance, at the next index.
+  - The mean run length is not tested against b, because runs are cut off at the horizon: its expectation is T/(1 + (T − 1)p), 9.655 at T = 252 and b = 10 (§12).
+  - Chunked and unchunked generation give identical paths when they consume the generator in the same order.
+- **Memory and time.** Chunks of 2,048 paths keep the temporaries at about 3 × T × 2,048 values. The peak at the API caps is still 216 MB, set by the block bootstrap (§18 above). The stationary model takes 302 ms of a default request, against 112 ms for the block bootstrap and 124 ms for GBM, and the three-model request takes 633 ms against its 1.5 s target (README).
+
+### 30. Automatic block length (§10.8)
+- **The estimator.** Politis & White (2004) choose the block length that minimizes the mean squared error of the bootstrap's estimate of the variance of the sample mean. To first order, b_opt = (2G²/D)^(1/3) · n^(1/3), where G = Σ_k |k| γ(k) measures how far the autocovariances γ reach and D depends on the method, D_SB = 2g² for the stationary and D_CB = (4/3)g² for the circular bootstrap, with g = Σ_k γ(k). Patton, Politis & White (2009) corrected D_SB. The sums are estimated with a flat-top lag window whose bandwidth is chosen from the data.
+- **The `arch` check (§10.8).** `arch` 8.0.0 installs with the project's pins on Python 3.14 on Windows, and pip resolves it for 3.12 on Windows and for 3.12 and 3.14 on Linux, where CI installs it. Its output columns are named `stationary` and `circular`. On 20 reference series it matched an independent implementation of the formulas within 6e-16: AR(1) series with φ from 0 to 0.9 and n = 500 or 2,520, iid Student-t, a GARCH-like series, and SPY's daily log returns and their absolute values. The ratio circular/stationary was (3/2)^(1/3) = 1.1447 on every series, as D_SB/D_CB implies, and on long AR(1) series the estimates came within 4% of the theoretical optimum *(prototype, 2026-10-19)*.
+- **Rounding up and clipping.** Block lengths are whole days. Rounding up means an estimate of 1.3 gives 2, keeping some dependence, rather than 1, an iid bootstrap. The upper bound is the API's maximum of 63 days. The other bound in §10.8, ⌊n_hist/2⌋, never binds, because n_hist ≥ 252 makes it at least 126.
+- **It runs on ℓ itself.** With `zero_drift`, the bootstraps resample ℓ − mean(ℓ), and the estimate is the same either way, because it depends only on autocovariances. Computing it before demeaning keeps the rounding of the subtraction out of it.
+- **What it chooses** *(engine)*: 14 days (circular) and 12 (stationary) for SPY over 2015–2025 (table above), 2 and 2 for the KO/PEP pairs strategy's returns, and 1 and 1 for the diversified trend portfolio's. Request: the table's, or `{"source": "strategy", "backtest": {...}, "block_len": "auto", "seed": 42}` with the §27–28 backtest requests.
+- **What it optimizes.** The criterion is the variance of the mean. Volatility clustering, dependence in squared returns, doesn't enter it at all, and neither does the tail of a compounded 252-day return. In the `arch` check, SPY's daily log returns gave a stationary block length of 7.4 days, while their absolute values, which carry the clustering, gave 139 *(prototype)*. So "auto" is a defensible, data-driven default, not the best block length for VaR (Limitations).
+
 ## Limitations
 - **Selection and survivorship bias.** The preset pairs and ETFs were chosen with hindsight: they exist today and are known to be related. A pair that stopped moving together, or a stock that was delisted, never enters the sample, which flatters every pairs result.
 - **Execution.**
@@ -439,7 +532,11 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **The cost sweep holds positions fixed** (§8.1). A trader facing higher costs would trade less, so at high costs the sweep understates what a re-optimized strategy could earn.
 - **The T-bill rate.** ^IRX is based on the 13-week bill's discount rate, which is slightly below its investment yield (by about 0.1 percentage point at a 5% rate), so cash and short proceeds earn slightly too little. Daily accrual is simple (a/252), not compounded.
 - **Daily rebalancing to target weights,** with no cost for drift (§6.1): between signal changes, the model's weights stay constant without trading.
-- **Pairs exits use the rolling z** while the frozen-β spread is held (§5.3), so an exit can fire slightly early or late relative to the spread actually held.
+- **Pairs exits use the rolling z** while the frozen-β spread is held (§5.3), so an exit can fire slightly early or late relative to the spread actually held. With the Kalman model, they use the filtered z.
+- **The Kalman model's δ and start-up window are tuned parameters.**
+  - The default δ = 1e-6 was chosen on the dispersion of z for KO/PEP over 2015–2025 and for the test pair (§27 above). That uses no returns, but it is still a choice made on this sample, and the right δ differs between pairs.
+  - R is estimated once, from the first L days, and never updated. If the hedge ratio drifted during those days, R is overstated and z understated for the whole run (§27).
+  - The model's δ is not estimated by maximum likelihood.
 - **Multiple testing.** The sensitivity grid tests 20 configurations (5 for trend), and a user may try many more by hand. The best cell's Sharpe ratio is biased upwards by the selection itself.
   - The deflated Sharpe ratio corrects for the grid's own trials only. Every configuration tried before, by hand or in earlier runs, is a hidden trial it can't count.
   - It treats the grid's correlated cells as independent, an approximation whose net effect was conservative in the calibration above (§25).
@@ -449,12 +546,19 @@ z_t = (ln P_t − mean) / std over the trailing L days of the log price: a Bolli
 - **Walk-forward selection chases noisy training Sharpe ratios.** Over three years an annualized Sharpe ratio has a standard error of about 0.6 (√(252/756), §13 above), so the best of 20 is largely the luckiest. Many distinct choices mean unstable parameters, not adaptivity: on KO/PEP the walk-forward chose 10 of 20 configurations, and their test Sharpe ratios averaged −1.03 against 0.29 in training (§26). The ranking also ignores the cost of switching, which the stitched series then pays.
 - **A walk-forward switch trades at the close that completes its training window.** Fold j's choice uses returns through the close of b_j − 1 and trades at that same close, as an execution lag of 0 would (§2 above). Ranking the configurations needs that close, so in practice the switch would fill a day later. Each configuration's own signals keep their lag k; only the switch, at most once per fold, is optimistic.
 - **The Sharpe CI assumes iid returns** (Lo 2002). Autocorrelation, volatility clustering and fat tails make the true interval wider, especially for strategies that hold positions for weeks.
-- **Trend following here trades one asset at a time.** The published results come from diversified portfolios of dozens of futures. A single asset's trend Sharpe ratio is much lower and noisier: 0.32 on SPY (§10 above). Phase 7 adds a multi-asset portfolio.
+- **Trend following on one asset is much weaker than the published results,** which come from diversified portfolios of dozens of futures: 0.32 on SPY (§10 above).
+- **The trend portfolio is a small, short version of the published one.**
+  - It holds 2 to 12 ETFs, not 58 futures. The presets are chosen with hindsight, and so are their histories (survivorship, above).
+  - Its calendar is the intersection of its legs', so it starts after its youngest ETF's first lookback. ETFs are younger than the futures markets they track.
+  - Under the default 40% per asset and 2× leverage, most legs sit at their cap, which turns the equal risk budgets into equal notional weights (§28 above).
+  - Equal volatility budgets ignore correlations: two highly correlated legs, such as SPY and QQQ, carry nearly twice the risk of one.
+  - Its 10-year Sharpe ratio on the diversified preset has a 95% CI of −0.6 to 0.6 (§28), so it can't confirm or reject the published result.
 - **The vol forecast lags.** The EWMA reacts to a volatility spike only after it starts, so realized vol overshoots the target in crashes: the weekly overlay's yearly range above still reaches 14.0% against a 10% target.
 - **Vol targeting sizes up when measured volatility falls,** including during stale-price runs. The leverage cap limits this, and the data warning flags the runs.
 - **Leverage is financed at rf,** with no spread and no margin constraints beyond `max_leverage`.
 - **GBM assumes iid normal log returns:** no fat tails, no volatility clustering, and constant drift and volatility.
-- **The bootstrap assumes stationarity** and can't produce a day worse than the worst day in the history. The block length is a tuning choice; Phase 7 adds an estimated one.
+- **The bootstraps assume stationarity** and can't produce a day worse than the worst day in the history.
+- **The block length matters, and "auto" doesn't settle it.** On SPY the stationary bootstrap's VaR95 ranged from 10.9% to 15.2% across block lengths of 1 to 40 days (§29 above). The automatic estimate minimizes the error in the variance of the mean, ignoring volatility clustering and the tail (§30 above).
 - **Monte Carlo ignores parameter uncertainty,** treating μ̂ and σ̂ as known, and it inherits any overfitting in the backtest it resamples: projecting an overfit strategy projects the overfitting.
 - **Yahoo data quality.** The data is unofficial and has occasional bad prints, missing days and revisions. Adjusted closes depend on Yahoo's dividend and split records. The cleaning rules catch the obvious errors, not the subtle ones.
 
@@ -634,3 +738,45 @@ As Phase 0, item 3 planned, `npm test` is now plain `vitest run`.
    - The perturbation test's walk-forward cases check the stitched weights and total return as well as the excess.
    - The bench also times `run_walk_forward` alone and reports the folds and distinct choices.
    - Planted bugs: 18 of 18 in the backend caught by tests; 12 of 13 in the frontend helpers, the 13th caught by the TypeScript check in `npm run build`.
+
+### Phase 7 (approved 2026-10-19)
+Items 1–4 were approved while the phase was being built, on 2026-10-19.
+1. **The Kalman standardization test holds the state constant over the start-up window, with L = 2,000 (§12, item 9).** As written, the test simulated a state that is a random walk from day 0, and it failed on nearly every seed. The §5.7 start estimates R from an OLS fit that assumes a fixed state, so drift in those days overstates R and shrinks z (§27). The test now holds the simulated state constant over days 0…L−1, which is what the start assumes. It uses L = 2,000, outside the API's 10–252 range, so the sampling error of the estimated R stays well inside the bounds. The 0.05 bounds are unchanged, and the test runs for δ = 1e-4 and 1e-5. All 200 prototype seeds passed with this setup. CLAUDE.md §12 now says so.
+2. **The default `kalman_delta` is 1e-6, not 1e-4 (§5.7, §11.2).** At 1e-4 the std of z on KO/PEP over 2015–2025 was 0.35, and the model made 4 trades; on the test pair it made none. At 1e-6 the std is 1.13 on KO/PEP and 1.14 on the test pair (§27). The valid range, 1e-7 to 1e-2, is unchanged. CLAUDE.md §5.7 and §11.2 now give 1e-6.
+3. **A ruin-day credit is split across the legs by gross weight (§6.2, §7.4).** The spec credits the clipped amount to "the trade held into r", and a trend portfolio can hold several legs into r. Each leg's trade gets the share |w_{i,r−1}| / Σ_j |w_{j,r−1}|, so the reconciliation stays exact (§28). Tested. CLAUDE.md §7.4 now says so.
+4. **pytest-xdist runs the suite in parallel (§3, §12).** One process took 71.6 s, against the 60 s budget. `requirements-dev.txt` pins `pytest-xdist==3.8.0`, and `pyproject.toml` adds `-n auto` to pytest's options, so `python -m pytest` is still the command. With one worker per core (16 here) the suite takes about 30 s; `-n 0` runs it in one process. CLAUDE.md §3 and §12 now list it.
+5. **`run_backtest` has one argument with a default, `leg_signals=None` (§6.1).** §6.1 says no input has a default. The trend portfolio passes each leg's signal, and the backtester then identifies and attributes trades leg by leg (§7.4). It also checks that `s` is the invested flag and that each leg's weight is exactly 0 where its own signal is flat. With the default, every other call site, in the pipeline and the tests, is unchanged. A portfolio that forgot it would number its trades on the invested flag; `_run_trend_portfolio` is the only caller that passes it, and its tests cover it.
+6. **The per-leg bookkeeping is written with NumPy (§7.1, §7.3).** For the trend portfolio, the §7.1 attribution and the §7.3 bookkeeping run on arrays, not pandas group-bys, because they run once per leg. That brought a 4-leg backtest from 69 ms to 40 ms. Single-trade strategies keep the pandas code of §7.3, so their outputs are unchanged bit for bit. A test checks that each leg's trades match that leg backtested alone through the pandas code: the same dates, and P&L within 1e-15.
+7. **Per-leg outputs where the spec is silent (§5.8, §7.4, §11.3).**
+   - `BacktestResult` gains `held`: true on the days a position is held into, by any leg. It drives `pct_days_in_market`, the Sharpe ratio's no-exposure rule, the rolling statistics, walk-forward eligibility and the Monte Carlo exposure check, for every strategy. For single-trade strategies it equals `held_id` not null.
+   - For the trend portfolio, `trade_id` and `held_id` are frames with one column per leg, holding the portfolio-wide ids, and `leg_pos` holds each leg's executed position.
+   - `series.position` is the executed invested flag, and `series.gross_exposure` sums the legs.
+   - In `series.legs`, `score` and `vol_forecast` are as of each close, like the single-asset `series.score` and `series.vol_forecast`; `position` and `weight` are executed. §11.3 said "executed values" for all four, and now says which are which.
+   - `beta_at_entry` is `null` for leg trades.
+   - The cap warning reads "Legs were at their leverage cap (max_leverage / N) on 76% of invested asset-days …", because the figure counts asset-days.
+   - The sensitivity grid and the walk-forward work for the trend portfolio, with trend's L axis (§9); their benchmark is the basket.
+8. **The Kalman model (§5.7).**
+   - The start is computed in closed form with centred sums, rather than by a matrix solve. The guards run first.
+   - `StrategyParams` requires L ≥ 3 for the Kalman model, because R divides by L − 2. The API's minimum is 10.
+9. **Monte Carlo (§10.7, §10.8, §11.3).**
+   - The automatic block lengths are computed on ℓ before `zero_drift` demeans it, which gives the same estimate without the subtraction's rounding (§30).
+   - If the estimate is undefined (NaN), the request returns 422. No real series has produced one.
+   - `resolved.block_len` echoes the request, a number or `"auto"`, and `block_len_used` gives the lengths actually used: the request's number for both bootstraps, or the two estimates.
+   - The ⌊n_hist/2⌋ bound of §10.8 never binds, because n_hist ≥ 252 makes it at least 126, above the cap of 63.
+   - CLAUDE.md §10.7 said the stationary bootstrap's results are "less sensitive to the exact block length". On SPY they were more sensitive (§29), and Lahiri (1999) finds the stationary bootstrap less accurate. CLAUDE.md §10.7 now says what the random lengths do achieve, a stationary resampled series, and notes this finding.
+10. **API (§11.2).** The vol target's range depends on the strategy (1–50%, or 5–60% per asset for the trend portfolio, where `null` becomes 40%), so it is checked in the model validator instead of as a field constraint. Its 422 message names the range for the strategy.
+11. **Dashboard (§13).**
+    - The strategy switch uses short labels, "Mean rev.", "Pairs", "Trend" and "Portfolio", with the full names as tooltips, so four fit across the sidebar.
+    - The portfolio's tickers are one text field, separated by spaces or commas, with a count ("4 of 2–12"). The count and uniqueness are left to the API's 422, like every range (Phase 3, item 6). The presets are "Trend ETFs" (SPY, QQQ, GLD, TLT) and "Diversified".
+    - Pairs get a "Pairs model" switch and a "State noise δ" field. Under the Kalman model the hedge-mode switch calls its daily re-hedging "Filtered" rather than "Rolling".
+    - Monte Carlo has an "auto" checkbox beside the block length. The table gains a stationary-bootstrap column and a "Block length used" row, and the summary gives the lengths used, such as "auto: 14 days circular, mean 12 days stationary".
+    - The benchmark is labelled "Equal-weight basket" for the portfolio ("EW basket" in column headers, "EW" in tiles), and the buy & hold toggle shows and hides it the same way.
+    - The KPI grid's vol group shows "Target per asset" with each leg's cap ("each leg ≤ 0.20× of 2.0×"), and "Days at cap" counts invested asset-days. Its strategy group notes that the trade figures count every leg's trades, and its Monte Carlo group shows VaR95 and CVaR95 for all three models, extending Phase 3, item 4.
+    - The trades table gets a "Leg" column after the id, and the assumptions footer names the pairs model and the portfolio's sizing.
+12. **Tests, bench and checks beyond §12 and §14.**
+    - Extra tests: each leg's trades equal that leg backtested alone (item 6); the ruin-credit split; each leg resizing on refresh days and on its own signal changes; the basket benchmark; the portfolio's input checks; the Kalman model feeding the unchanged pairs pipeline; a nearly flat (not exactly flat) X window; automatic block lengths rounding up and clipping, with a stubbed estimator; and the third model leaving GBM and the block bootstrap unchanged, at a block length of 10 and at "auto".
+    - The portfolio vol-tracking test (§12, item 10) calls the sizing and the backtester directly, because a trend signal can't be held constant. It uses zero-drift assets, a 20% target per asset, a 4× cap that never binds, and 20 seeds.
+    - The bench adds `run_strategy` with rolling OLS and with the Kalman filter, the 10-ETF portfolio, each model's time inside a Monte Carlo request, a request with `block_len: "auto"`, and the memory peak with three models.
+    - Planted bugs: 38 of 38 in the backend and 20 of 20 in the frontend helpers were caught. The first backend pass missed two, a long-only per-leg case and automatic block lengths that round instead of rounding up; a test was added for each, and both are caught now.
+    - Eleven earlier API responses on real data (6 backtests, 3 grids and 2 Monte Carlo runs), from the Phase 6 code and from this code, are identical apart from the new fields and the Monte Carlo histogram, whose bins now pool three models (§18).
+    - Screenshots: every dashboard view was captured again on 2026-10-19, and five views were added (README). Seven files changed, through the new labels and the Monte Carlo panel's third model; the rest came out byte-identical. The two error views are still the Phase 3 captures.

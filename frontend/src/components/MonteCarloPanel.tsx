@@ -12,18 +12,23 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { fmtInt, fmtMs, fmtPct, fmtSignedPct } from '../format'
+import { fmtDayCount, fmtInt, fmtMs, fmtPct, fmtSignedPct } from '../format'
 import type { Async } from '../state'
-import { fanRows, histogramRows, niceTicks, type FanRow, type HistRow } from '../transform'
+import { blockLengthLabel, fanRows, histogramRows, niceTicks, type FanRow, type HistRow } from '../transform'
 import { AXIS_TICK, CHART_MARGIN, COLORS, TOOLTIP_STYLE } from '../theme'
 import type { ModelResult, MonteCarloResponse } from '../types'
 import { AsyncNotice, Panel, Segmented } from './ui'
 
-type ModelKey = 'gbm' | 'bootstrap'
+type ModelKey = 'gbm' | 'bootstrap' | 'stationary'
 
 const MODELS = [
   { value: 'gbm', label: 'GBM', title: 'Geometric Brownian motion: iid normal log returns' },
-  { value: 'bootstrap', label: 'Bootstrap', title: 'Circular moving-block bootstrap of historical log returns' },
+  { value: 'bootstrap', label: 'Block bootstrap', title: 'Circular moving-block bootstrap of historical log returns' },
+  {
+    value: 'stationary',
+    label: 'Stationary',
+    title: 'Stationary bootstrap (Politis & Romano): blocks of random, geometric length',
+  },
 ] as const
 
 // Stable accessors: a range Area takes a dataKey that returns [low, high] (§13).
@@ -139,7 +144,7 @@ function Histogram(props: { model: ModelResult; edges: number[] }) {
 }
 
 function RiskTable(props: { data: MonteCarloResponse }) {
-  const { gbm, bootstrap, closed_form_gbm: cf } = props.data
+  const { gbm, bootstrap, stationary, closed_form_gbm: cf } = props.data
   const rows = [
     { label: 'VaR 95%', key: 'var95' },
     { label: 'CVaR 95%', key: 'cvar95' },
@@ -153,7 +158,8 @@ function RiskTable(props: { data: MonteCarloResponse }) {
           <th className="py-1 text-left font-normal">Loss over the horizon</th>
           <th className="py-1 text-right font-normal">GBM simulated</th>
           <th className="py-1 text-right font-normal">GBM closed form</th>
-          <th className="py-1 text-right font-normal">Bootstrap</th>
+          <th className="py-1 text-right font-normal">Block bootstrap</th>
+          <th className="py-1 text-right font-normal">Stationary bootstrap</th>
         </tr>
       </thead>
       <tbody>
@@ -163,15 +169,25 @@ function RiskTable(props: { data: MonteCarloResponse }) {
             <td className="py-1 text-right">{fmtPct(gbm[r.key], 2)}</td>
             <td className="py-1 text-right text-neutral-400">{fmtPct(cf[r.key], 2)}</td>
             <td className="py-1 text-right">{fmtPct(bootstrap[r.key], 2)}</td>
+            <td className="py-1 text-right">{fmtPct(stationary[r.key], 2)}</td>
           </tr>
         ))}
+        <tr className="border-t border-neutral-800 text-neutral-500">
+          <td className="py-1">Block length used</td>
+          <td className="py-1 text-right">—</td>
+          <td className="py-1 text-right">—</td>
+          <td className="py-1 text-right">{fmtDayCount(props.data.resolved.block_len_used.circular)}</td>
+          <td className="py-1 text-right" title="The mean of the random block lengths">
+            mean {fmtDayCount(props.data.resolved.block_len_used.stationary)}
+          </td>
+        </tr>
       </tbody>
     </table>
   )
 }
 
 function Meta(props: { data: MonteCarloResponse; onUseSeed: (seed: number) => void }) {
-  const { resolved: r, gbm, bootstrap } = props.data
+  const { resolved: r, gbm, bootstrap, stationary } = props.data
   const item = (label: string, value: string, wide = false) => (
     <div className={wide ? 'col-span-2' : undefined}>
       <dt className="text-[11px] text-neutral-500">{label}</dt>
@@ -194,14 +210,15 @@ function Meta(props: { data: MonteCarloResponse; onUseSeed: (seed: number) => vo
           </button>
         </dd>
       </div>
-      {item('Block length', `${r.block_len} days`)}
+      {item('Block length', blockLengthLabel(r))}
       {item('History', `${fmtInt(r.n_hist)} daily returns (${r.window ?? 'ticker'} window)`)}
       {item('Paths × horizon', `${fmtInt(r.n_paths)} × ${r.horizon} days`)}
       {item('Drift μ (log, daily)', `${fmtPct(r.mu_daily, 3)} · ${fmtPct(r.mu_daily * 252, 1)}/yr${r.zero_drift ? ' (zero drift)' : ''}`)}
       {item('Vol σ (log, daily)', `${fmtPct(r.sigma_daily, 2)} · ${fmtPct(r.sigma_daily * Math.sqrt(252), 1)}/yr`)}
       {item(
         'Elapsed',
-        `${fmtMs(props.data.elapsed_ms_total)} total: GBM ${fmtMs(gbm.elapsed_ms)}, bootstrap ${fmtMs(bootstrap.elapsed_ms)}`,
+        `${fmtMs(props.data.elapsed_ms_total)} total: GBM ${fmtMs(gbm.elapsed_ms)}, block bootstrap ` +
+          `${fmtMs(bootstrap.elapsed_ms)}, stationary ${fmtMs(stationary.elapsed_ms)}`,
         true,
       )}
     </dl>
@@ -238,7 +255,7 @@ export const MonteCarloPanel = memo(function MonteCarloPanel(props: {
             </div>
             <div>
               <p className="mb-1 text-[11px] tracking-widest text-neutral-500 uppercase">
-                Terminal return · 50 bins shared by both models
+                Terminal return · 50 bins shared by the three models
               </p>
               <Histogram model={model} edges={data.hist_edges} />
             </div>

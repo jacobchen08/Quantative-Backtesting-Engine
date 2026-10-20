@@ -3,7 +3,7 @@
 // walk-forward goes out only from its own panel's button.
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
-import { EquityPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
+import { EquityPanel, PortfolioSignalPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
 import { CalendarPanel } from './components/CalendarPanel'
 import { CostSweepPanel } from './components/CostSweepPanel'
 import { KpiGrid } from './components/KpiGrid'
@@ -15,7 +15,7 @@ import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
 import { WalkForwardPanel } from './components/WalkForwardPanel'
 import { buildRequests, buildWalkForward, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
 import type { Async } from './state'
-import { assumptionLines, benchmarkName, firstOosIndex, seriesRows } from './transform'
+import { assumptionLines, benchmarkLabels, firstOosIndex, legRows, seriesRows } from './transform'
 import type {
   BacktestResponse,
   MonteCarloResponse,
@@ -36,7 +36,8 @@ function RunHeader(props: { bt: BacktestResponse }) {
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
       <h2 className="text-lg text-neutral-100">
-        {STRATEGY_LABEL[r.strategy]} <span className="text-neutral-500">·</span> {r.tickers.join(' / ')}
+        {STRATEGY_LABEL[r.strategy]} <span className="text-neutral-500">·</span>{' '}
+        {r.tickers.join(r.strategy === 'trend_portfolio' ? ', ' : ' / ')}
       </h2>
       <p className="text-xs text-neutral-500">
         {r.start} → {r.end} · L {r.L} · first evaluated {r.first_evaluated_date} · split {r.split_date} · run #{bt.run_id} ·
@@ -179,12 +180,14 @@ export default function App() {
     const bt = backtest.data
     try {
       const { rows, unplacedMarkers } = seriesRows(bt.series, bt.trades)
+      const legs = legRows(bt.series, bt.trades) // trend portfolio only; empty otherwise
       return {
         bt,
         rows,
-        unplacedMarkers,
+        legs: legs.legs,
+        unplacedMarkers: unplacedMarkers + legs.unplacedMarkers,
         firstOos: firstOosIndex(bt.series.is_oos),
-        benchmark: benchmarkName(bt.resolved.strategy, bt.resolved.tickers),
+        benchmark: benchmarkLabels(bt.resolved.strategy, bt.resolved.tickers),
         error: null,
       }
     } catch (error) {
@@ -239,9 +242,19 @@ export default function App() {
         )}
         {guard(
           'Signal',
-          <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />,
+          bt.resolved.strategy === 'trend_portfolio' ? (
+            <PortfolioSignalPanel
+              rows={view.rows}
+              legs={view.legs}
+              firstOos={view.firstOos}
+              backtest={bt}
+              unplacedMarkers={view.unplacedMarkers}
+            />
+          ) : (
+            <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />
+          ),
         )}
-        {guard('Trades', <TradesTable trades={bt.trades} pairs={bt.resolved.strategy === 'pairs'} />)}
+        {guard('Trades', <TradesTable trades={bt.trades} strategy={bt.resolved.strategy} />)}
         {guard('Cost sweep', <CostSweepPanel backtest={bt} segment={segment} />)}
         {guard('Sensitivity', <SensitivityHeatmap state={sensitivity} />)}
         {guard(

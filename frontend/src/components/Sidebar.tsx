@@ -2,7 +2,11 @@
 // request builder (form.ts) sends only those. Nothing is sent until Run is pressed.
 import type { Dispatch, ReactNode, SetStateAction } from 'react'
 import {
+  isTrendLike,
+  KALMAN_DELTA_DEFAULT,
   PAIR_PRESETS,
+  parseTickerList,
+  PORTFOLIO_PRESETS,
   STRATEGIES,
   TRADING_DAYS_PER_MONTH,
   TREND_MONTHS,
@@ -97,7 +101,11 @@ export function Sidebar(props: {
     (value: FormState[K]) =>
       setForm((f) => ({ ...f, [key]: value }))
   const { strategy } = form
+  const trendLike = isTrendLike(strategy)
+  const portfolio = strategy === 'trend_portfolio'
   const activePair = PAIR_PRESETS.find((p) => p.y === form.pairY && p.x === form.pairX)
+  const portfolioList = parseTickerList(form.portfolioTickers)
+  const activePortfolio = PORTFOLIO_PRESETS.find((p) => p.tickers.join(' ') === portfolioList.join(' '))
 
   return (
     <form
@@ -145,6 +153,36 @@ export function Sidebar(props: {
                 ))}
               </div>
               {activePair && <p className="text-[11px] leading-snug text-neutral-500">{activePair.note}</p>}
+            </>
+          ) : portfolio ? (
+            <>
+              <Field
+                label={`Tickers (${portfolioList.length} of 2–12)`}
+                hint="Separated by spaces or commas. The run's calendar is the history they share, so the youngest sets the start."
+              >
+                <textarea
+                  className={INPUT + ' h-16 resize-none uppercase'}
+                  value={form.portfolioTickers}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="SPY QQQ GLD TLT"
+                  onChange={(e) => set('portfolioTickers')(e.target.value.toUpperCase())}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-1">
+                {PORTFOLIO_PRESETS.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    title={`${p.tickers.join(', ')}: ${p.note}`}
+                    className={chipClass(p === activePortfolio)}
+                    onClick={() => set('portfolioTickers')(p.tickers.join(' '))}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              {activePortfolio && <p className="text-[11px] leading-snug text-neutral-500">{activePortfolio.note}</p>}
             </>
           ) : (
             <>
@@ -198,10 +236,21 @@ export function Sidebar(props: {
         </Section>
 
         <Section title="Signal">
-          <Field label="Lookback L (trading days)">
-            <NumberInput value={form.L} onChange={set('L')} min={strategy === 'trend' ? 21 : 10} max={strategy === 'trend' ? 504 : 252} step={1} />
+          <Field
+            label={
+              strategy === 'pairs' && form.pairsModel === 'kalman'
+                ? 'Start-up window L (trading days)'
+                : 'Lookback L (trading days)'
+            }
+            hint={
+              strategy === 'pairs' && form.pairsModel === 'kalman'
+                ? 'The filter starts from an OLS fit on the first L days.'
+                : undefined
+            }
+          >
+            <NumberInput value={form.L} onChange={set('L')} min={trendLike ? 21 : 10} max={trendLike ? 504 : 252} step={1} />
           </Field>
-          {strategy === 'trend' && (
+          {trendLike && (
             <div className="flex flex-wrap gap-1">
               {TREND_MONTHS.map((m) => {
                 const days = String(m * TRADING_DAYS_PER_MONTH)
@@ -213,7 +262,7 @@ export function Sidebar(props: {
               })}
             </div>
           )}
-          {strategy !== 'trend' && (
+          {!trendLike && (
             <div className="grid grid-cols-2 gap-2">
               <Field label="z entry">
                 <NumberInput value={form.zEntry} onChange={set('zEntry')} min={0} max={5} step={0.1} />
@@ -223,7 +272,7 @@ export function Sidebar(props: {
               </Field>
             </div>
           )}
-          {strategy === 'trend' && (
+          {trendLike && (
             <Field label="Signal checked">
               <Segmented
                 label="Signal frequency"
@@ -237,17 +286,52 @@ export function Sidebar(props: {
             </Field>
           )}
           {strategy === 'pairs' && (
-            <Field label="Hedge ratio">
-              <Segmented
-                label="Hedge mode"
-                value={form.hedgeMode}
-                options={[
-                  { value: 'fixed_at_entry', label: 'Fixed at entry', title: 'β frozen for the whole trade' },
-                  { value: 'rolling', label: 'Rolling', title: 'Re-hedged daily with the rolling β' },
-                ]}
-                onChange={set('hedgeMode')}
-              />
-            </Field>
+            <>
+              <Field label="Model">
+                <Segmented
+                  label="Pairs model"
+                  value={form.pairsModel}
+                  options={[
+                    { value: 'ols', label: 'Rolling OLS', title: 'β and z from an OLS fit on the trailing L days' },
+                    { value: 'kalman', label: 'Kalman', title: 'β from a Kalman filter; z is its standardized innovation' },
+                  ]}
+                  onChange={set('pairsModel')}
+                />
+              </Field>
+              {form.pairsModel === 'kalman' && (
+                <Field
+                  label="State noise δ"
+                  hint={`How fast the hedge ratio may drift: q = δ/(1−δ) a day. Default ${KALMAN_DELTA_DEFAULT}; range 1e-7 to 1e-2.`}
+                >
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    className={INPUT}
+                    value={form.kalmanDelta}
+                    spellCheck={false}
+                    onChange={(e) => set('kalmanDelta')(e.target.value.trim())}
+                  />
+                </Field>
+              )}
+              <Field label="Hedge ratio">
+                <Segmented
+                  label="Hedge mode"
+                  value={form.hedgeMode}
+                  options={[
+                    { value: 'fixed_at_entry', label: 'Fixed at entry', title: 'β frozen for the whole trade' },
+                    {
+                      value: 'rolling',
+                      label: form.pairsModel === 'kalman' ? 'Filtered' : 'Rolling',
+                      title:
+                        form.pairsModel === 'kalman'
+                          ? 'Re-hedged daily with the filtered β'
+                          : 'Re-hedged daily with the rolling β',
+                    },
+                  ]}
+                  onChange={set('hedgeMode')}
+                />
+              </Field>
+            </>
           )}
         </Section>
 
@@ -314,23 +398,35 @@ export function Sidebar(props: {
         <Section
           title="Vol targeting"
           aside={
-            <label className="flex items-center gap-1.5 text-xs text-neutral-400">
-              <input
-                type="checkbox"
-                className="accent-emerald-500"
-                checked={form.volOn}
-                onChange={(e) => set('volOn')(e.target.checked)}
-              />
-              {form.volOn ? 'On' : 'Off'}
-            </label>
+            portfolio ? (
+              <span className="text-xs text-neutral-500" title="The trend portfolio is always vol-scaled per asset (§5.8)">
+                always on
+              </span>
+            ) : (
+              <label className="flex items-center gap-1.5 text-xs text-neutral-400">
+                <input
+                  type="checkbox"
+                  className="accent-emerald-500"
+                  checked={form.volOn}
+                  onChange={(e) => set('volOn')(e.target.checked)}
+                />
+                {form.volOn ? 'On' : 'Off'}
+              </label>
+            )
           }
         >
-          {form.volOn ? (
+          {portfolio || form.volOn ? (
             <>
               <div className="grid grid-cols-2 gap-2">
-                <Field label="Target (%/yr)">
-                  <NumberInput value={form.volTargetPct} onChange={set('volTargetPct')} min={1} max={50} step={1} />
-                </Field>
+                {portfolio ? (
+                  <Field label="Target per asset (%/yr)">
+                    <NumberInput value={form.portfolioVolPct} onChange={set('portfolioVolPct')} min={5} max={60} step={5} />
+                  </Field>
+                ) : (
+                  <Field label="Target (%/yr)">
+                    <NumberInput value={form.volTargetPct} onChange={set('volTargetPct')} min={1} max={50} step={1} />
+                  </Field>
+                )}
                 <Field label="Half-life (days)">
                   <NumberInput value={form.volHalflife} onChange={set('volHalflife')} min={5} max={126} step={1} />
                 </Field>
@@ -347,7 +443,14 @@ export function Sidebar(props: {
                   onChange={set('volRefresh')}
                 />
               </Field>
-              <Field label="Max leverage (×)">
+              <Field
+                label="Max leverage (×)"
+                hint={
+                  portfolio
+                    ? 'Each of the N legs is sized to the target and capped at max leverage / N, so the gross exposure stays within max leverage.'
+                    : undefined
+                }
+              >
                 <NumberInput value={form.maxLeverage} onChange={set('maxLeverage')} min={1} max={4} step={0.25} />
               </Field>
             </>
@@ -395,7 +498,17 @@ export function Sidebar(props: {
               <NumberInput value={form.mcHorizon} onChange={set('mcHorizon')} min={5} max={504} step={1} />
             </Field>
             <Field label="Block length">
-              <NumberInput value={form.mcBlockLen} onChange={set('mcBlockLen')} min={1} max={63} step={1} />
+              {form.mcBlockAuto ? (
+                <input
+                  type="text"
+                  className={INPUT + ' text-neutral-500'}
+                  value="auto"
+                  disabled
+                  title="Estimated from the history (Politis & White)"
+                />
+              ) : (
+                <NumberInput value={form.mcBlockLen} onChange={set('mcBlockLen')} min={1} max={63} step={1} />
+              )}
             </Field>
             <Field label="Seed">
               <input
@@ -408,6 +521,15 @@ export function Sidebar(props: {
               />
             </Field>
           </div>
+          <label className="flex items-center gap-1.5 text-xs text-neutral-400" title="Politis & White (2004), with the 2009 correction">
+            <input
+              type="checkbox"
+              className="accent-emerald-500"
+              checked={form.mcBlockAuto}
+              onChange={(e) => set('mcBlockAuto')(e.target.checked)}
+            />
+            Automatic block length, estimated from the history
+          </label>
           <label className="flex items-center gap-1.5 text-xs text-neutral-400">
             <input
               type="checkbox"

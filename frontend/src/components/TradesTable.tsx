@@ -2,7 +2,7 @@
 import { memo, useMemo, useState } from 'react'
 import { DASH, fmtInt, fmtNum, fmtSignedPct } from '../format'
 import { sortTrades, type SortDir, type TradeKey } from '../transform'
-import type { Trade } from '../types'
+import type { Strategy, Trade } from '../types'
 import { Panel } from './ui'
 
 type Column = { key: TradeKey; label: string; title?: string; align?: 'right'; cell: (t: Trade) => string }
@@ -29,6 +29,20 @@ const BETA: Column = {
 
 const STATUS: Column = { key: 'open', label: 'Status', title: 'Open trades are excluded from the win rate', cell: (t) => (t.open ? 'open' : 'closed') }
 
+const TICKER: Column = {
+  key: 'ticker',
+  label: 'Leg',
+  title: 'The trend-portfolio leg: each leg trades on its own (§7.4)',
+  cell: (t) => t.ticker ?? DASH,
+}
+
+/** The trend portfolio gets a leg column after the id, pairs a β column; every table ends with the status. */
+function columnsFor(strategy: Strategy): Column[] {
+  if (strategy === 'trend_portfolio') return [COLUMNS[0], TICKER, ...COLUMNS.slice(1), STATUS]
+  if (strategy === 'pairs') return [...COLUMNS, BETA, STATUS]
+  return [...COLUMNS, STATUS]
+}
+
 function cellTone(key: TradeKey, t: Trade): string {
   if (key === 'pnl') return t.pnl > 0 ? 'text-emerald-300' : t.pnl < 0 ? 'text-red-300' : ''
   if (key === 'side') return t.side === 'long' ? 'text-emerald-300' : 'text-red-300'
@@ -36,10 +50,10 @@ function cellTone(key: TradeKey, t: Trade): string {
   return ''
 }
 
-export const TradesTable = memo(function TradesTable(props: { trades: Trade[]; pairs: boolean }) {
+export const TradesTable = memo(function TradesTable(props: { trades: Trade[]; strategy: Strategy }) {
   const [sort, setSort] = useState<{ key: TradeKey; dir: SortDir }>({ key: 'id', dir: 'asc' })
   const sorted = useMemo(() => sortTrades(props.trades, sort.key, sort.dir), [props.trades, sort])
-  const columns = props.pairs ? [...COLUMNS, BETA, STATUS] : [...COLUMNS, STATUS]
+  const columns = columnsFor(props.strategy)
   const nOpen = props.trades.filter((t) => t.open).length
 
   const toggle = (key: TradeKey) =>

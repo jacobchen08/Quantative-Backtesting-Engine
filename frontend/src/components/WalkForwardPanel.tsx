@@ -19,11 +19,12 @@ import {
 import { STRATEGY_LABEL } from '../form'
 import type { Async } from '../state'
 import {
-  benchmarkName,
+  benchmarkLabels,
   configLabel,
   foldBands,
   selectionChanges,
   walkForwardRows,
+  type BenchmarkLabels,
   type FoldBand,
   type WalkForwardRow,
 } from '../transform'
@@ -69,7 +70,7 @@ function EquityChart(props: {
   rows: WalkForwardRow[]
   bands: FoldBand[]
   fixedLabel: string
-  benchmark: string
+  benchmark: BenchmarkLabels
   showBenchmark: boolean
 }) {
   return (
@@ -108,7 +109,7 @@ function EquityChart(props: {
       {props.showBenchmark && (
         <Line
           dataKey="benchmark"
-          name={`Buy & hold ${props.benchmark}`}
+          name={props.benchmark.name}
           stroke={COLORS.benchmark}
           strokeWidth={1}
           dot={false}
@@ -119,12 +120,12 @@ function EquityChart(props: {
   )
 }
 
-function MetricsTable(props: { data: WalkForwardResponse; fixedLabel: string; benchmark: string; showBenchmark: boolean }) {
+function MetricsTable(props: { data: WalkForwardResponse; fixedLabel: string; benchmark: BenchmarkLabels; showBenchmark: boolean }) {
   const { data } = props
   const columns: { label: string; metrics: Metrics | null; tone: string }[] = [
     { label: 'Walk-forward', metrics: data.metrics, tone: 'text-neutral-100' },
     { label: `Fixed: ${props.fixedLabel}`, metrics: data.fixed_metrics, tone: 'text-neutral-300' },
-    ...(props.showBenchmark ? [{ label: `B&H ${props.benchmark}`, metrics: data.benchmark_metrics, tone: 'text-slate-400' }] : []),
+    ...(props.showBenchmark ? [{ label: props.benchmark.short, metrics: data.benchmark_metrics, tone: 'text-slate-400' }] : []),
   ]
   return (
     <table className="w-full text-xs tabular-nums">
@@ -211,7 +212,7 @@ function Results(props: { data: WalkForwardResponse; showBenchmark: boolean }) {
   const { data, showBenchmark } = props
   const r = data.resolved
   const fixedLabel = configLabel({ L: r.L, z_entry: r.z_entry })
-  const benchmark = benchmarkName(r.strategy, r.tickers)
+  const benchmark = benchmarkLabels(r.strategy, r.tickers)
   const rows = useMemo(() => walkForwardRows(data.series), [data.series])
   const bands = useMemo(() => foldBands(data.series), [data.series])
   const dates = data.series.dates
@@ -247,7 +248,7 @@ function Results(props: { data: WalkForwardResponse; showBenchmark: boolean }) {
             <>
               <Key color={COLORS.strategy}>Walk-forward</Key>
               <Key color={COLORS.fixed}>Fixed: {fixedLabel}</Key>
-              {showBenchmark && <Key color={COLORS.benchmark}>Buy &amp; hold {benchmark}</Key>}
+              {showBenchmark && <Key color={COLORS.benchmark}>{benchmark.name}</Key>}
               <Key color={COLORS.oos} glyph="▮">
                 alternate test folds
               </Key>
