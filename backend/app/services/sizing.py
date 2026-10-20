@@ -91,18 +91,10 @@ def size_weights(
         SizedWeights. Weights are exactly 0.0 whenever the signal is flat. Raises ValueError
         if any weight is NaN.
     """
-    if not vol_target > 0:
-        raise ValueError(f"vol_target must be > 0, got {vol_target}")
-    if not max_leverage > 0:
-        raise ValueError(f"max_leverage must be > 0, got {max_leverage}")
+    _check_target(vol_target, max_leverage)
     scale = (vol_target / sigma).clip(upper=max_leverage)  # sigma == 0 -> inf -> clipped to the cap
-    if vol_refresh == "daily":
-        refresh = pd.Series(True, index=sigma.index)
-    elif vol_refresh in ("weekly", "monthly"):
-        refresh = first_of_period(sigma.index, "W" if vol_refresh == "weekly" else "M")
-    else:
-        raise ValueError(f"unknown vol_refresh {vol_refresh!r}")
-    scale_used = scale.where(refresh | signal.ne(signal.shift())).ffill()
+    resize = _refresh_days(sigma.index, vol_refresh) | signal.ne(signal.shift()).to_numpy()
+    scale_used = scale.where(resize).ffill()
     W = unit_weights.mul(scale_used, axis=0)
     W.loc[signal == 0] = 0.0  # exactly 0 when flat (NaN x 0 is NaN)
     if W.isna().any().any():
@@ -130,18 +122,29 @@ def size_portfolio(
         (W, scale_used): w_i = s_i * scale_used_i / N, exactly 0.0 where s_i = 0. Each leg is at
         most max_leverage / N, so the gross exposure never exceeds max_leverage.
     """
-    n_legs = leg_signals.shape[1]
-    W = pd.DataFrame(0.0, index=leg_signals.index, columns=leg_signals.columns)
-    scale_used = pd.DataFrame(index=leg_signals.index, columns=leg_signals.columns, dtype=float)
-    for leg in leg_signals.columns:
-        sized = size_weights(
-            leg_signals[[leg]],
-            leg_signals[leg],
-            sigmas[leg],
-            vol_target=vol_target,
-            max_leverage=max_leverage,
-            vol_refresh=vol_refresh,
-        )
-        W[leg] = sized.weights[leg] / n_legs
-        scale_used[leg] = sized.scale_used
+    _check_target(vol_target, max_leverage)
+    scale = (vol_target / sigmas).clip(upper=max_leverage)
+    # size_weights' rule, column by column: a leg resizes on refresh days and when its signal changes.
+    changed = leg_signals.ne(leg_signals.shift()).to_numpy()
+    resize = _refresh_days(sigmas.index, vol_refresh)[:, None] | changed
+    scale_used = scale.where(resize).ffill()
+    W = (leg_signals * scale_used).where(leg_signals != 0, 0.0) / leg_signals.shape[1]
+    if W.isna().any().any():
+        raise ValueError("sized weights contain NaN")
     return W, scale_used
+
+
+def _check_target(vol_target: float, max_leverage: float) -> None:
+    if not vol_target > 0:
+        raise ValueError(f"vol_target must be > 0, got {vol_target}")
+    if not max_leverage > 0:
+        raise ValueError(f"max_leverage must be > 0, got {max_leverage}")
+
+
+def _refresh_days(index: pd.DatetimeIndex, vol_refresh: str) -> np.ndarray:
+    """The days on which the size may change without a signal change (§5.6)."""
+    if vol_refresh == "daily":
+        return np.ones(len(index), dtype=bool)
+    if vol_refresh in ("weekly", "monthly"):
+        return first_of_period(index, "W" if vol_refresh == "weekly" else "M").to_numpy()
+    raise ValueError(f"unknown vol_refresh {vol_refresh!r}")

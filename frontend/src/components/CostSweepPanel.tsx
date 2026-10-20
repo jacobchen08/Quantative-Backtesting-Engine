@@ -1,16 +1,15 @@
 // Sharpe against one-way trading cost (§8.1, §13 view 8), for the segment the KPI toggle selects.
 // One run gives the whole sweep: positions don't depend on the cost, so excess(c) is linear in c.
 import { memo, useMemo } from 'react'
-import { CartesianGrid, Line, LineChart, ReferenceLine, Tooltip, XAxis, YAxis } from 'recharts'
+import { CartesianGrid, Line, LineChart, ReferenceLine, XAxis } from 'recharts'
 import { fmtBps, fmtNum } from '../format'
 import { costSweepView, niceTicks } from '../transform'
-import { AXIS_TICK, CHART_MARGIN, COLORS, TOOLTIP_STYLE } from '../theme'
+import { AXIS_TICK, CHART_MARGIN, COLORS } from '../theme'
 import type { BacktestResponse, SegmentKey } from '../types'
+import { numTip, tooltip, valueAxis, zeroLine } from './chart'
 import { Muted, Panel } from './ui'
 
 const SEGMENT_NAME: Record<SegmentKey, string> = { is: 'in-sample', oos: 'out-of-sample', full: 'full period' }
-
-const sharpeTip = (value: unknown) => fmtNum(typeof value === 'number' ? value : null, 2)
 
 export const CostSweepPanel = memo(function CostSweepPanel(props: { backtest: BacktestResponse; segment: SegmentKey }) {
   const { backtest: bt, segment } = props
@@ -45,21 +44,9 @@ export const CostSweepPanel = memo(function CostSweepPanel(props: { backtest: Ba
             tickLine={false}
             tickFormatter={(v: number) => `${v} bps`}
           />
-          <YAxis
-            width={64}
-            tick={AXIS_TICK}
-            stroke={COLORS.axis}
-            tickLine={false}
-            domain={['auto', 'auto']}
-            tickFormatter={(v: number) => fmtNum(v, 2)}
-          />
-          <Tooltip
-            {...TOOLTIP_STYLE}
-            isAnimationActive={false}
-            formatter={sharpeTip}
-            labelFormatter={(v: unknown) => `${String(v)} bps one-way`}
-          />
-          <ReferenceLine y={0} stroke={COLORS.exitBand} strokeDasharray="2 3" />
+          {valueAxis((v) => fmtNum(v, 2))}
+          {tooltip(numTip, (v) => `${String(v)} bps one-way`)}
+          {zeroLine()}
           <ReferenceLine
             x={own}
             stroke={COLORS.split}

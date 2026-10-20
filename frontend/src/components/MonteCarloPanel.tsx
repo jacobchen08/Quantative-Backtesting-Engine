@@ -10,13 +10,13 @@ import {
   ReferenceLine,
   Tooltip,
   XAxis,
-  YAxis,
 } from 'recharts'
 import { fmtDayCount, fmtInt, fmtMs, fmtPct, fmtSignedPct } from '../format'
 import type { Async } from '../state'
 import { blockLengthLabel, fanRows, histogramRows, niceTicks, type FanRow, type HistRow } from '../transform'
 import { AXIS_TICK, CHART_MARGIN, COLORS, TOOLTIP_STYLE } from '../theme'
 import type { ModelResult, MonteCarloResponse } from '../types'
+import { tooltip, valueAxis } from './chart'
 import { AsyncNotice, Panel, Segmented } from './ui'
 
 type ModelKey = 'gbm' | 'bootstrap' | 'stationary'
@@ -49,7 +49,7 @@ function FanChart(props: { model: ModelResult; horizon: number }) {
   const { domain, ticks } = useMemo(() => {
     const lo = Math.min(...rows.map((r) => Math.min(r.p5, ...r.paths)))
     const hi = Math.max(...rows.map((r) => Math.max(r.p95, ...r.paths)))
-    return { domain: [lo, hi], ticks: niceTicks(lo - 1, hi - 1, 5).map((t) => 1 + t) }
+    return { domain: [lo, hi] as [number, number], ticks: niceTicks(lo - 1, hi - 1, 5).map((t) => 1 + t) }
   }, [rows])
   return (
     <ComposedChart responsive width="100%" height={300} data={rows} margin={CHART_MARGIN}>
@@ -64,16 +64,8 @@ function FanChart(props: { model: ModelResult; horizon: number }) {
         tickLine={false}
         tickFormatter={(t: number) => `${t}d`}
       />
-      <YAxis
-        width={56}
-        tick={AXIS_TICK}
-        stroke={COLORS.axis}
-        tickLine={false}
-        domain={domain}
-        ticks={ticks}
-        tickFormatter={(v: number) => fmtSignedPct(v - 1, 0)}
-      />
-      <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={multipleTip} labelFormatter={(t) => `day ${t}`} />
+      {valueAxis((v) => fmtSignedPct(v - 1, 0), { width: 56, domain, ticks })}
+      {tooltip(multipleTip, (t) => `day ${String(t)}`)}
       <ReferenceLine y={1} stroke={COLORS.axis} />
       <Area dataKey={band90} name="p5–p95" stroke="none" fill={COLORS.fan} fillOpacity={0.12} dot={false} isAnimationActive={false} />
       <Area dataKey={band50} name="p25–p75" stroke="none" fill={COLORS.fan} fillOpacity={0.25} dot={false} isAnimationActive={false} />
@@ -118,7 +110,7 @@ function Histogram(props: { model: ModelResult; edges: number[] }) {
         tickLine={false}
         tickFormatter={(v: number) => fmtSignedPct(v, 0)}
       />
-      <YAxis width={56} tick={AXIS_TICK} stroke={COLORS.axis} tickLine={false} tickFormatter={(v: number) => fmtInt(v)} />
+      {valueAxis((v) => fmtInt(v), { width: 56 })}
       <Tooltip
         {...TOOLTIP_STYLE}
         isAnimationActive={false}

@@ -112,55 +112,55 @@ cd backend
 
 The bench keeps its own price cache, `backend\bench.db`, so it never touches the app's database or run history. Its first run downloads the data, and every timed request after that is served from the cache. Requests go through FastAPI's TestClient in process, so the times include validation, the engine, storing the run and JSON encoding, but no network or browser.
 
-The tables below are copied from its output on 2026-10-19 (the Phase 7 run), after the test suite had finished and before the dev servers were started:
+The tables below are copied from its output on 2026-10-20, after the performance refactor, with no other workload running:
 
 - CPU: AMD Ryzen 7 PRO 8840HS w/ Radeon 780M Graphics, 16 logical cores; RAM: 59.7 GiB
 - OS: Windows-11-10.0.26220-SP0; Python 3.14.6 (CPython)
 - Libraries: numpy 2.5.4, pandas 3.0.6, scipy 1.18.1, statsmodels 0.15.0, arch 8.0.0, fastapi 0.143.2, starlette 1.8.0, pydantic 2.14.1, SQLAlchemy 2.1.4
-- Data: KO/PEP pairs, every other setting default, 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db. This run first downloaded the nine ETFs of the trend portfolio that bench.db didn't have yet (QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC, VNQ); no timed request reached the network.
+- Data: KO/PEP pairs, every other setting default, 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db (no downloads)
 - Each row: 10 timed runs after one warm-up run, wall clock (time.perf_counter)
 
 **CLAUDE.md §14 targets**
 
 | Workload | Median | Min | Max | Target | Met |
 |---|---:|---:|---:|---:|---:|
-| 15-year pairs backtest, first request on the data (diagnostics computed) | 351 ms | 341 ms | 426 ms | < 300 ms | **no** |
-| 15-year pairs backtest, z_entry changed (diagnostics cached) | 159 ms | 152 ms | 183 ms | < 300 ms | yes |
-| Default sensitivity grid (20 configurations) | 575 ms | 540 ms | 648 ms | < 5 s | yes |
-| Default walk-forward, 15-year pairs (20 configurations) | 603 ms | 573 ms | 634 ms | < 8 s | yes |
-| Default Monte Carlo, 10,000 x 252: GBM and block bootstrap (their elapsed_ms) | 236 ms | 232 ms | 245 ms | < 1 s | yes |
-| Default Monte Carlo, three models: the request | 633 ms | 621 ms | 642 ms | < 1.5 s | yes |
-| Default Monte Carlo, three models: the simulation alone (elapsed_ms_total) | 543 ms | 537 ms | 554 ms | < 1.5 s | yes |
-| 15-year Kalman pairs backtest, first request on the data (diagnostics computed) | 341 ms | 334 ms | 506 ms | < 500 ms | yes |
+| 15-year pairs backtest, first request on the data (diagnostics computed) | 299 ms | 270 ms | 327 ms | < 300 ms | yes |
+| 15-year pairs backtest, z_entry changed (diagnostics cached) | 134 ms | 129 ms | 177 ms | < 300 ms | yes |
+| Default sensitivity grid (20 configurations) | 423 ms | 340 ms | 456 ms | < 5 s | yes |
+| Default walk-forward, 15-year pairs (20 configurations) | 385 ms | 373 ms | 423 ms | < 8 s | yes |
+| Default Monte Carlo, 10,000 x 252: GBM and block bootstrap (their elapsed_ms) | 147 ms | 137 ms | 173 ms | < 1 s | yes |
+| Default Monte Carlo, three models: the request | 384 ms | 362 ms | 420 ms | < 1.5 s | yes |
+| Default Monte Carlo, three models: the simulation alone (elapsed_ms_total) | 294 ms | 268 ms | 320 ms | < 1.5 s | yes |
+| 15-year Kalman pairs backtest, first request on the data (diagnostics computed) | 256 ms | 251 ms | 268 ms | < 500 ms | yes |
 
 **Pairs backtest by stage (first request on the data)**
 
 | Stage | Median | Min | Max |
 |---|---:|---:|---:|
-| Load prices and rf from the cache | 52.2 ms | 48.9 ms | 55.5 ms |
-| run_strategy (section 5.0, steps 1-6) | 22.8 ms | 21.7 ms | 31.1 ms |
-| Diagnostics: two Engle-Granger tests, static OLS, half-life | 184 ms | 172 ms | 206 ms |
-| Report: metrics, benchmark, trades, warnings, series | 32.0 ms | 30.5 ms | 33.1 ms |
-| Serialization: payload, response model, JSON | 40.6 ms | 39.9 ms | 52.6 ms |
-| Sum of the stages | 330 ms | 318 ms | 368 ms |
-| Diagnostics from the cache instead (key and lookup) | 0.16 ms | 0.14 ms | 0.19 ms |
+| Load prices and rf from the cache | 59.8 ms | 51.5 ms | 78.2 ms |
+| run_strategy (section 5.0, steps 1-6) | 23.4 ms | 20.2 ms | 32.7 ms |
+| Diagnostics: two Engle-Granger tests, static OLS, half-life | 137 ms | 114 ms | 149 ms |
+| Report: metrics, benchmark, trades, warnings, series | 37.6 ms | 30.9 ms | 43.2 ms |
+| Serialization: payload, response model, JSON | 17.1 ms | 15.8 ms | 27.1 ms |
+| Sum of the stages | 281 ms | 234 ms | 310 ms |
+| Diagnostics from the cache instead (key and lookup) | 0.17 ms | 0.14 ms | 0.23 ms |
 
-The whole request took 351 ms (median). The rest is parsing and validating the request, storing the run, FastAPI's own response handling and the TestClient round trip.
+The whole request took 299 ms (median). The rest is parsing and validating the request, storing the run, FastAPI's own response handling and the TestClient round trip.
 
 **Parameter iteration: each request changes one field of the one before**
 
 | Field changed | Median | Min | Max | Diagnostics cache |
 |---|---:|---:|---:|---:|
-| z_entry (1.55, 1.60, ...) | 159 ms | 152 ms | 183 ms | 10 hits, 0 misses |
-| L (24, 28, ...), default 70% split | 374 ms | 349 ms | 435 ms | 0 hits, 10 misses |
-| L (24, 28, ...), split_date fixed | 165 ms | 157 ms | 222 ms | 10 hits, 0 misses |
+| z_entry (1.55, 1.60, ...) | 134 ms | 129 ms | 177 ms | 10 hits, 0 misses |
+| L (24, 28, ...), default 70% split | 315 ms | 296 ms | 368 ms | 0 hits, 10 misses |
+| L (24, 28, ...), split_date fixed | 169 ms | 150 ms | 216 ms | 10 hits, 0 misses |
 
 **Walk-forward (default: 756 training and 63 test days, rolling)**
 
 | Stage | Median | Min | Max |
 |---|---:|---:|---:|
-| The request (as in the first table) | 603 ms | 573 ms | 634 ms |
-| run_walk_forward alone (no loading or serialization) | 511 ms | 505 ms | 541 ms |
+| The request (as in the first table) | 385 ms | 373 ms | 423 ms |
+| run_walk_forward alone (no loading or serialization) | 330 ms | 318 ms | 369 ms |
 
 It backtests 20 grid configurations plus the request's own, then makes 46 folds: 2,897 out-of-sample days, on which 15 distinct configurations were chosen.
 
@@ -168,10 +168,10 @@ It backtests 20 grid configurations plus the request's own, then makes 46 folds:
 
 | Workload | Median | Min | Max |
 |---|---:|---:|---:|
-| run_strategy, rolling OLS (the default pairs model) | 23.1 ms | 21.7 ms | 29.8 ms |
-| run_strategy, Kalman filter (delta 1e-6) | 25.0 ms | 24.1 ms | 31.0 ms |
-| Trend portfolio of 10 ETFs: the request | 383 ms | 367 ms | 413 ms |
-| Trend portfolio of 10 ETFs: run_strategy alone | 95.1 ms | 91.9 ms | 105 ms |
+| run_strategy, rolling OLS (the default pairs model) | 20.0 ms | 19.3 ms | 25.4 ms |
+| run_strategy, Kalman filter (delta 1e-6) | 31.6 ms | 23.2 ms | 34.5 ms |
+| Trend portfolio of 10 ETFs: the request | 366 ms | 341 ms | 516 ms |
+| Trend portfolio of 10 ETFs: run_strategy alone | 83.4 ms | 68.8 ms | 90.1 ms |
 
 The trend portfolio (SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC, VNQ; L = 252, a 40% target per asset) runs on the intersection of their calendars: 3,520 series days from 2012-01-03, 219 leg trades.
 
@@ -179,27 +179,45 @@ The trend portfolio (SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC, VNQ; L = 252, 
 
 | Model (time inside the default request) | Median | Min | Max |
 |---|---:|---:|---:|
-| GBM | 124 ms | 122 ms | 131 ms |
-| Circular block bootstrap (block length 10) | 112 ms | 109 ms | 122 ms |
-| Stationary bootstrap (mean block length 10) | 302 ms | 297 ms | 314 ms |
-| The request with block_len "auto" | 638 ms | 620 ms | 673 ms |
-| The simulation alone with block_len "auto" (elapsed_ms_total) | 545 ms | 533 ms | 586 ms |
+| GBM | 80.9 ms | 73.1 ms | 93.3 ms |
+| Circular block bootstrap (block length 10) | 64.9 ms | 57.6 ms | 79.8 ms |
+| Stationary bootstrap (mean block length 10) | 141 ms | 130 ms | 166 ms |
+| The request with block_len "auto" | 378 ms | 350 ms | 405 ms |
+| The simulation alone with block_len "auto" (elapsed_ms_total) | 295 ms | 268 ms | 304 ms |
 
 With block_len "auto" the block lengths were 2 (circular) and 2 (stationary).
 
 Peak traced memory at the API caps (50,000 paths x 253 days, three models): 216 MB, 2.13x the 102 MB path array (tracemalloc, which sees numpy's buffers).
 
+**Before and after the performance refactor** (medians from two bench runs on 2026-10-20, same machine; every API response is byte-identical between the two versions apart from the Monte Carlo's timings)
+
+| Workload | Before | After |
+|---|---:|---:|
+| 15-year pairs backtest, first request on the data | 414 ms | 299 ms |
+| Two Engle–Granger tests (the diagnostics stage) | 201 ms | 137 ms |
+| Serialization stage | 51.9 ms | 17.1 ms |
+| Default sensitivity grid | 689 ms | 423 ms |
+| Default walk-forward | 728 ms | 385 ms |
+| Default Monte Carlo, three models: the request | 682 ms | 384 ms |
+| Trend portfolio of 10 ETFs: run_strategy alone | 139 ms | 83.4 ms |
+
+The changes, each checked to leave every output bit-identical (METHODOLOGY §20):
+- OpenBLAS runs on one thread. The two Engle–Granger tests fit 53 least-squares regressions of about 2,600 rows and up to 28 columns, and at that size OpenBLAS's threads cost more than they save: one thread nearly halves the tests' time.
+- The sensitivity grid and the walk-forward skip the trade bookkeeping of their 20 backtests; they only read the daily returns.
+- The entry and exit rule, the trend portfolio's sizing and the JSON conversion of the chart series work on whole arrays instead of element by element or leg by leg. The stationary bootstrap finds where each block began with a loop of whole-row maxima, about 20 times faster than NumPy's accumulate down the columns.
+- The Monte Carlo bands (five quantiles of 10,000 paths on each of 253 days) are computed in four blocks of days at once; NumPy releases the interpreter lock while it partitions.
+
 **What the numbers mean**
 
-- **The first request on new data still misses the 300 ms target**, at 351 ms. About half of it (184 ms) is the two Engle–Granger cointegration tests.
-- **The API caches those tests,** because they depend only on the two price series and the split date (METHODOLOGY §20). Changing z_entry, z_exit, costs or the hedge mode reuses them, and the backtest takes 159 ms.
-- **Changing L recomputes them under the default split,** because a new lookback moves the default 70% split date. With `split_date` set, L changes hit the cache too (165 ms).
-- **The Kalman filter costs about 2 ms** over rolling OLS in `run_strategy` (25.0 ms against 23.1 ms). A first Kalman request, 341 ms against its 500 ms target, is as slow as a first rolling-OLS request because both run the same Engle–Granger tests; the 10 ms between the two medians is run-to-run variation.
-- **Runs vary.** The Phase 6 run on 2026-10-17 measured the first pairs request at 334 ms, against 351 ms here, with stage sums of 321 ms and 330 ms.
-- **The stationary bootstrap is the slowest model,** at 302 ms against 112 ms for the block bootstrap: it draws a restart flag and a start for every day of every path (METHODOLOGY §29). The three-model request takes 633 ms against its 1.5 s target, and GBM and the block bootstrap together still take 236 ms against their 1 s target.
+- **The first request on new data now meets the 300 ms target, narrowly**: 299 ms median, with runs from 270 to 327 ms. The two Engle–Granger cointegration tests are still almost half of it (137 ms).
+- **The API caches those tests,** because they depend only on the two price series and the split date (METHODOLOGY §20). Changing z_entry, z_exit, costs or the hedge mode reuses them, and the backtest takes 134 ms.
+- **Changing L recomputes them under the default split,** because a new lookback moves the default 70% split date. With `split_date` set, L changes hit the cache too (169 ms).
+- **A first Kalman request is no slower than a first rolling-OLS request** (256 ms and 299 ms): both run the same Engle–Granger tests, and the gap between the medians is run-to-run variation. Inside `run_strategy` the filter takes 31.6 ms against 20.0 ms for rolling OLS.
+- **Runs vary.** Before the refactor, the Phase 7 run on 2026-10-19 measured the first pairs request at 351 ms, and the run on 2026-10-20 at 414 ms, on the same machine. The before and after figures above come from the same day.
+- **The stationary bootstrap is still the slowest model,** at 141 ms against 65 ms for the block bootstrap: it draws a restart flag and a start for every day of every path (METHODOLOGY §29).
 - **Memory is unchanged** at 216 MB: the peak comes from the block bootstrap, and the stationary bootstrap builds its paths in chunks of 2,048.
-- **A 10-ETF trend portfolio takes 383 ms,** with 95 ms in `run_strategy`: ten legs' forecasts, signals and sizing, and per-leg trades.
-- **The sensitivity grid and the walk-forward** are well inside their targets, at 575 ms against 5 s and 603 ms against 8 s.
+- **A 10-ETF trend portfolio takes 366 ms,** with 83 ms in `run_strategy`: ten legs' forecasts, signals and sizing, and per-leg trades.
+- **The sensitivity grid and the walk-forward** are well inside their targets, at 423 ms against 5 s and 385 ms against 8 s.
 
 ## Screenshots
 

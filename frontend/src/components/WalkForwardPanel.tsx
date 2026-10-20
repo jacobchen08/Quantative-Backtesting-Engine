@@ -2,13 +2,12 @@
 // fixed-parameter run and the benchmark, with alternate test folds shaded, then a metrics table and
 // the fold table. It has its own Run button, because it backtests every grid configuration.
 import { memo, useMemo } from 'react'
-import { CartesianGrid, Line, LineChart, ReferenceArea, Tooltip, XAxis, YAxis } from 'recharts'
+import { CartesianGrid, Line, LineChart, ReferenceArea } from 'recharts'
 import {
   DASH,
   fmtCI,
   fmtInt,
   fmtMoney,
-  fmtMonth,
   fmtMultiple,
   fmtNum,
   fmtPct,
@@ -28,10 +27,10 @@ import {
   type FoldBand,
   type WalkForwardRow,
 } from '../transform'
-import { AXIS_TICK, CHART_MARGIN, COLORS, TOOLTIP_STYLE } from '../theme'
+import { CHART_MARGIN, COLORS } from '../theme'
 import type { Metrics, WalkForwardResponse } from '../types'
-import { ChartTitle, Key } from './BacktestCharts'
-import { AsyncNotice, Muted, Panel, Stat } from './ui'
+import { dateAxis, moneyTip, tooltip, valueAxis } from './chart'
+import { AsyncNotice, ChartTitle, Key, Muted, Panel, Stat } from './ui'
 
 type Row = { label: string; value: (m: Metrics) => string; title?: string }
 
@@ -57,9 +56,6 @@ const METRIC_ROWS: readonly Row[] = [
   { label: 'Win rate', value: (m) => fmtPct(m.win_rate, 0) },
 ]
 
-const asNumber = (value: unknown) => (typeof value === 'number' ? value : null)
-const moneyTip = (value: unknown) => fmtMoney(asNumber(value))
-
 /** The tooltip's date line, with the fold that owns the day. */
 function foldLabel(date: unknown, items: readonly { payload?: unknown }[] | undefined): string {
   const row = items?.[0]?.payload as WalkForwardRow | undefined
@@ -76,16 +72,9 @@ function EquityChart(props: {
   return (
     <LineChart responsive width="100%" height={300} data={props.rows} margin={CHART_MARGIN}>
       <CartesianGrid stroke={COLORS.grid} vertical={false} />
-      <XAxis dataKey="date" tick={AXIS_TICK} tickFormatter={fmtMonth} minTickGap={56} stroke={COLORS.axis} tickLine={false} />
-      <YAxis
-        width={64}
-        tick={AXIS_TICK}
-        stroke={COLORS.axis}
-        tickLine={false}
-        domain={['auto', 'auto']}
-        tickFormatter={(v: number) => fmtMoney(v, true)}
-      />
-      <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={moneyTip} labelFormatter={foldLabel} />
+      {dateAxis()}
+      {valueAxis((v) => fmtMoney(v, true))}
+      {tooltip(moneyTip, foldLabel)}
       {props.bands.map((band) => (
         <ReferenceArea
           key={band.fold}

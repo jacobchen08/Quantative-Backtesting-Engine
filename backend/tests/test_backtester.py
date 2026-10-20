@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import date
 
 import numpy as np
@@ -412,6 +412,39 @@ def test_per_leg_trades_reconcile_and_never_overlap(synthetic_prices, universe, 
         runs += 1
     assert runs >= 50 and flips > 0 and resized > 0
     assert worst < 1e-9
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"strategy": "pairs", "tickers": ("Y", "X"), "L": 60, "vol_target": 0.10, "execution_lag": 2},
+        {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40, "allow_short": False, "borrow_bps": 200.0},
+        {"strategy": "trend_portfolio", "tickers": ("T08", "T15", "T20"), "L": 126, "vol_target": 0.40},
+    ],
+    ids=["pairs", "mean-reversion", "trend-portfolio"],
+)
+def test_skipping_the_trade_bookkeeping_changes_nothing_else(
+    portfolio_prices: pd.DataFrame, varying_rf, config: dict
+) -> None:
+    """The parameter grids run without the trade bookkeeping (trades=False): the trade fields are
+    None and every other field of the backtest is exactly as in a full run."""
+    rf = varying_rf(portfolio_prices.index)
+    params = StrategyParams(**config)
+    full = run_strategy(portfolio_prices, rf, params).backtest
+    lean = run_strategy(portfolio_prices, rf, params, trades=False).backtest
+    trade_fields = ("trade_id", "held_id", "pnl", "trades")
+    assert all(getattr(lean, name) is None for name in trade_fields)
+    assert len(full.trades) > 0
+    for field in fields(BacktestResult):
+        if field.name in trade_fields:
+            continue
+        a, b = getattr(full, field.name), getattr(lean, field.name)
+        if isinstance(a, pd.Series):
+            pd.testing.assert_series_equal(a, b, check_exact=True)
+        elif isinstance(a, pd.DataFrame):
+            pd.testing.assert_frame_equal(a, b, check_exact=True)
+        else:
+            assert a == b, field.name
 
 
 @pytest.mark.parametrize("k, borrow, allow_short", [(0, 0.0, True), (1, 400.0, True), (2, 0.0, False)])

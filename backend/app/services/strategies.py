@@ -38,16 +38,23 @@ def hysteresis_signal(z: pd.Series, z_entry: float, z_exit: float) -> pd.Series:
     if not 0 <= z_exit < z_entry:
         raise ValueError(f"need 0 <= z_exit < z_entry, got z_exit={z_exit}, z_entry={z_entry}")
     # Two independent hysteresis legs; they can't both be on when 0 <= z_exit < z_entry.
-    short_m = pd.Series(np.nan, index=z.index)
-    short_m[z > z_entry] = 1.0
-    short_m[z < z_exit] = 0.0
-    long_m = pd.Series(np.nan, index=z.index)
-    long_m[z < -z_entry] = 1.0
-    long_m[z > -z_exit] = 0.0
-    short_m[z.isna()] = 0.0
-    long_m[z.isna()] = 0.0
-    signal = long_m.ffill().fillna(0.0) - short_m.ffill().fillna(0.0)
-    return signal.rename("signal")
+    # NaN compares False, so a NaN day turns neither leg on, and it turns both off.
+    v = z.to_numpy(dtype=float)
+    flat = np.isnan(v)
+    short = _latch(on=v > z_entry, off=(v < z_exit) | flat)
+    long = _latch(on=v < -z_entry, off=(v > -z_exit) | flat)
+    return pd.Series(long - short, index=z.index, name="signal")
+
+
+def _latch(*, on: np.ndarray, off: np.ndarray) -> np.ndarray:
+    """1.0 from each `on` day up to the next `off` day, which is 0.0; 0.0 before the first `on`.
+
+    Each day takes the value of the latest day that set the latch (1.0 if on, 0.0 if off; off
+    wins when both are true), so this is a forward fill of those days.
+    """
+    setting = on | off
+    latest = np.maximum.accumulate(np.where(setting, np.arange(on.size), -1))  # -1: none yet
+    return np.where((latest >= 0) & ~off[latest] & on[latest], 1.0, 0.0)
 
 
 def first_of_period(index: pd.DatetimeIndex, freq: Literal["W", "M"]) -> pd.Series:

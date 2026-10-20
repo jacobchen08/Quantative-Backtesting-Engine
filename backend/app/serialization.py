@@ -41,21 +41,22 @@ def to_jsonable(obj: Any) -> Any:
     if isinstance(obj, (pd.Series, pd.Index)):
         return to_jsonable(obj.to_numpy())
     if isinstance(obj, np.ndarray):
+        # Whole arrays at once: the chart series are thousands of values each.
         if obj.dtype.kind == "M":
-            return [None if pd.isna(day) else day.strftime("%Y-%m-%d") for day in pd.DatetimeIndex(obj)]
+            return _with_nulls(np.datetime_as_string(obj, unit="D"), np.isnat(obj))
         if obj.dtype.kind == "f":
-            return _finite(obj.tolist())
+            return _with_nulls(obj, ~np.isfinite(obj))
         return to_jsonable(obj.tolist())
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {field.name: to_jsonable(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
     raise TypeError(f"cannot convert {type(obj).__name__} to JSON")
 
 
-def _finite(values: Any) -> Any:
-    """Float lists from ndarray.tolist(), with NaN and inf replaced by None (any nesting)."""
-    if isinstance(values, list):
-        return [_finite(value) for value in values]
-    return values if math.isfinite(values) else None
+def _with_nulls(values: np.ndarray, null: np.ndarray) -> list:
+    """values as (nested) Python lists, with None where null is True."""
+    out = values.astype(object)  # Python floats or str, as tolist() would give
+    out[null] = None
+    return out.tolist()
 
 
 def backtest_payload(

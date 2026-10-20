@@ -81,7 +81,7 @@ quant-engine/
     requirements.txt         # exact pins (pip freeze of runtime deps)
     requirements-dev.txt     # pytest, pytest-xdist (Phase 7), ruff
     app/
-      __init__.py            # __version__ = engine version
+      __init__.py            # __version__ = engine version; one OpenBLAS thread (METHODOLOGY §20)
       main.py                # FastAPI app, lifespan (create tables), CORS, routes
       config.py              # env: DATABASE_URL, CORS_ORIGINS, LOG_LEVEL; QUANT_OFFLINE (Phase 8)
       database.py            # engine + session dependency

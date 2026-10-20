@@ -83,6 +83,8 @@ class BacktestResult:
     With per-leg trades (the trend portfolio, §7.4), trade_id and held_id are DataFrames with
     one column per leg, holding the portfolio-wide trade ids, and leg_pos holds each leg's
     executed position. Otherwise they are Series and leg_pos is None.
+
+    trade_id, held_id, pnl and trades are None when run_backtest was called with trades=False.
     """
 
     w: pd.DataFrame  # executed end-of-day weights, w_t = W_{t-k}
@@ -95,11 +97,11 @@ class BacktestResult:
     cost: pd.Series  # c * turnover, charged on the trade day
     excess: pd.Series  # daily return in excess of rf; clipped on the ruin day
     total: pd.Series  # daily total return rf + excess; exactly -1 on the ruin day
-    trade_id: pd.Series | pd.DataFrame  # trade whose executed position is held at the close of t (NaN = flat)
-    held_id: pd.Series | pd.DataFrame  # trade that earns day t's P&L, i.e. trade_id shifted by one day
+    trade_id: pd.Series | pd.DataFrame | None  # trade held at the close of t (NaN = flat)
+    held_id: pd.Series | pd.DataFrame | None  # trade that earns day t's P&L, i.e. trade_id shifted by one day
     leg_pos: pd.DataFrame | None  # per-leg trades only: each leg's executed position s_i shifted by k
-    pnl: pd.Series  # P&L per trade id as a fraction of equity (§7.1), within the window
-    trades: pd.DataFrame  # one row per trade with the §7.3 fields and ticker (beta_at_entry is added later)
+    pnl: pd.Series | None  # P&L per trade id as a fraction of equity (§7.1), within the window
+    trades: pd.DataFrame | None  # one row per trade: the §7.3 fields and ticker (beta_at_entry comes later)
     equity: pd.Series  # baseline E0 dated e - 1, then E_t through stop - 1
     drawdown: pd.Series  # E_t / running max - 1, same index as equity
     t0: int
@@ -210,6 +212,7 @@ def run_backtest(
     E0: float,
     split_date: date | pd.Timestamp,
     leg_signals: pd.DataFrame | None = None,
+    trades: bool = True,
 ) -> BacktestResult:
     """Daily returns, costs, borrow fees, equity, ruin and trades (§6.1, §6.2, §7).
 
@@ -230,6 +233,9 @@ def run_backtest(
             columns as R. Trades are then identified and attributed leg by leg, and s must be the
             "invested" flag: 1 where any leg's signal is non-zero, else 0. None (the default) for
             the other strategies, whose trades span all legs.
+        trades: False skips §7's attribution and trade records, leaving trade_id, held_id, pnl
+            and trades None. The parameter grids (§9, §9.2) read only the daily series, and the
+            bookkeeping is about a third of a backtest's time. Nothing else changes.
 
     Returns:
         BacktestResult. total_t = rf_t + sum_i w_{i,t-1} (r_{i,t} - rf_t) - borrow_t - cost_t,
@@ -285,7 +291,10 @@ def run_backtest(
 
     # §7.1 attribution follows P&L timing, within the evaluation window.
     window = slice(e, stop)  # every day before e is flat with zero weights
-    if leg_pos is None:
+    pnl = records = None
+    if not trades:
+        trade_id = held_id = None
+    elif leg_pos is None:
         credit_by_day = pd.Series(0.0, index=calendar)
         if ruined:
             credit_by_day.iloc[r] = credit
@@ -300,10 +309,11 @@ def run_backtest(
             credit=credit_by_day,
             window=window,
         )
-        trades = _trade_records(pnl, trade_id.iloc[:stop], held_id.iloc[:stop], pos, calendar, k, split)
-        trades["ticker"] = None
+        records = _trade_records(pnl, trade_id.iloc[:stop], held_id.iloc[:stop], pos, calendar, k, split)
+        records["ticker"] = None
+        trade_id, held_id = trade_id.rename("trade_id"), held_id.rename("held_id")
     else:
-        trade_id, pnl, trades = _leg_trades(
+        trade_id, pnl, records = _leg_trades(
             local_id=local_id,
             leg_pos=leg_pos,
             w=w,
@@ -339,11 +349,11 @@ def run_backtest(
         cost=cost.rename("cost"),
         excess=excess.rename("excess"),
         total=total.rename("total"),
-        trade_id=trade_id.rename("trade_id") if leg_pos is None else trade_id,
-        held_id=held_id.rename("held_id") if leg_pos is None else held_id,
+        trade_id=trade_id,
+        held_id=held_id,
         leg_pos=leg_pos,
-        pnl=pnl.rename("pnl"),
-        trades=trades,
+        pnl=None if pnl is None else pnl.rename("pnl"),
+        trades=records,
         equity=equity,
         drawdown=drawdown,
         t0=t0,

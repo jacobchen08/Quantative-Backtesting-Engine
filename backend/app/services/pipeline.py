@@ -150,7 +150,9 @@ class StrategyRun:
     leg_scale_used: pd.DataFrame | None = None
 
 
-def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) -> StrategyRun:
+def run_strategy(
+    prices: pd.DataFrame, rf: pd.Series, params: StrategyParams, *, trades: bool = True
+) -> StrategyRun:
     """Run the §5.0 steps in order: score, vol forecast and mask, signal, unit weights, sizing,
     then t0, resolve_split and the backtester.
 
@@ -159,6 +161,7 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
             calendar (tz-naive datetime64[ns], ascending, unique). No NaN, all > 0.
         rf: daily risk-free rate (decimal) on the same calendar (§2.3, §4.5).
         params: the resolved configuration.
+        trades: False skips the trade bookkeeping (run_backtest's trades), for the grids.
 
     Raises:
         TypeError: rf is not a pandas Series.
@@ -171,7 +174,7 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
     prices = prices[cols]
     returns = prices / prices.shift(1) - 1  # §2.1 simple returns; no pct_change
     if p.strategy == "trend_portfolio":
-        return _run_trend_portfolio(prices, rf, returns, p)
+        return _run_trend_portfolio(prices, rf, returns, p, trades=trades)
     overlay = p.vol_target is not None
 
     # 1. Raw score: the rolling-OLS (§5.3) or Kalman (§5.7) z and beta for pairs.
@@ -235,20 +238,7 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
             f"L = {p.L}{' and the volatility half-life' if overlay else ''}, or every window is degenerate."
         )
     t0 = int(np.argmax(valid))
-    k = p.execution_lag
-    split = backtester.resolve_split(prices.index[t0 + k :], p.split_date)
-    bt = backtester.run_backtest(
-        R=returns[legs],
-        W=W,
-        s=signal,
-        rf=rf,
-        t0=t0,
-        k=k,
-        cost_bps=p.cost_bps,
-        borrow_bps=p.borrow_bps,
-        E0=p.initial_capital,
-        split_date=split,
-    )
+    bt = _backtest(p, returns, W, signal, rf, t0, trades=trades)
     return StrategyRun(
         params=p,
         prices=prices,
@@ -269,7 +259,7 @@ def run_strategy(prices: pd.DataFrame, rf: pd.Series, params: StrategyParams) ->
 
 
 def _run_trend_portfolio(
-    prices: pd.DataFrame, rf: pd.Series, returns: pd.DataFrame, p: StrategyParams
+    prices: pd.DataFrame, rf: pd.Series, returns: pd.DataFrame, p: StrategyParams, *, trades: bool
 ) -> StrategyRun:
     """Strategy D (§5.8): the §5.0 steps per asset, then one backtest with per-leg trades (§7.4).
 
@@ -314,21 +304,7 @@ def _run_trend_portfolio(
     invested = leg_signals.ne(0).any(axis=1).astype(float).rename("signal")
 
     # 6. Evaluation.
-    k = p.execution_lag
-    split = backtester.resolve_split(prices.index[t0 + k :], p.split_date)
-    bt = backtester.run_backtest(
-        R=returns[legs],
-        W=W,
-        s=invested,
-        rf=rf,
-        t0=t0,
-        k=k,
-        cost_bps=p.cost_bps,
-        borrow_bps=p.borrow_bps,
-        E0=p.initial_capital,
-        split_date=split,
-        leg_signals=leg_signals,
-    )
+    bt = _backtest(p, returns, W, invested, rf, t0, leg_signals=leg_signals, trades=trades)
     return StrategyRun(
         params=p,
         prices=prices,
@@ -349,6 +325,36 @@ def _run_trend_portfolio(
         leg_signals=leg_signals,
         leg_vol_forecasts=vol_forecasts,
         leg_scale_used=scale_used,
+    )
+
+
+def _backtest(
+    p: StrategyParams,
+    returns: pd.DataFrame,
+    W: pd.DataFrame,
+    signal: pd.Series,
+    rf: pd.Series,
+    t0: int,
+    *,
+    leg_signals: pd.DataFrame | None = None,
+    trades: bool,
+) -> BacktestResult:
+    """Step 6 of §5.0: resolve the split on the days from e = t0 + k, then run the backtester."""
+    k = p.execution_lag
+    split = backtester.resolve_split(returns.index[t0 + k :], p.split_date)
+    return backtester.run_backtest(
+        R=returns[list(p.tickers)],
+        W=W,
+        s=signal,
+        rf=rf,
+        t0=t0,
+        k=k,
+        cost_bps=p.cost_bps,
+        borrow_bps=p.borrow_bps,
+        E0=p.initial_capital,
+        split_date=split,
+        leg_signals=leg_signals,
+        trades=trades,
     )
 
 
@@ -456,17 +462,8 @@ def build_report(
             seg_metrics[name] = bench_metrics[name] = None
             continue
         sl = slice(*bounds)
-        seg_metrics[name] = metrics.segment_metrics(
-            total=bt.total.iloc[sl],
-            excess=bt.excess.iloc[sl],
-            market_excess=market_excess.iloc[sl],
-            held=bt.held.iloc[sl],
-            gross_held=bt.gross_held.iloc[sl],
-            turnover=bt.turnover.iloc[sl],
-            cost=bt.cost.iloc[sl],
-            borrow=bt.borrow.iloc[sl],
-            trades=trades if name == "full" else trades.loc[trades["segment"] == name],
-        )
+        entered = trades if name == "full" else trades.loc[trades["segment"] == name]
+        seg_metrics[name] = _daily_metrics(bt, bt.held.to_numpy(), sl, market_excess, entered)
         bench_metrics[name] = metrics.benchmark_metrics(
             r=bench.iloc[sl], rf=run.rf.iloc[sl], market_excess=market_excess.iloc[sl]
         )
@@ -747,7 +744,8 @@ def run_grid(
     where: str,
 ) -> dict[Cell, StrategyRun]:
     """Every grid configuration through run_strategy, each with its own t0 and the common split
-    (§9, step 2). Keyed by (L, z_entry), in grid order: rows by L, then z_entry.
+    (§9, step 2). Keyed by (L, z_entry), in grid order: rows by L, then z_entry. The runs skip
+    the trade bookkeeping: the grids read only each backtest's daily series.
 
     Raises:
         NoValidScoreError, InsufficientDataError: a configuration has too little data. The
@@ -763,7 +761,7 @@ def run_grid(
                 else replace(params, L=L, z_entry=z, split_date=split)
             )
             try:
-                runs[(L, z)] = run_strategy(prices, rf, cfg)
+                runs[(L, z)] = run_strategy(prices, rf, cfg, trades=False)
             except NoValidScoreError as exc:
                 raise NoValidScoreError(
                     f"{label}: L = {L} gives no valid score on this date range. "
@@ -977,16 +975,11 @@ def run_walk_forward(
     excess = {cell: run.backtest.excess.to_numpy() for cell, run in runs.items()}
     held = {cell: run.backtest.held.to_numpy() for cell, run in runs.items()}
     chosen = [select_configuration(runs, excess, held, fw.train_start, fw.test_start) for fw in windows]
+    selected = [cell for cell, _ in chosen]
 
-    # 4. Stitching: fold j rules the executed weights at the closes [b_j - 1, b_{j+1} - 1).
+    # 4. Stitching, then §6.1 and §6.2's ruin rule on the stitched weights.
     legs = list(params.tickers)
-    w_star = np.zeros((n, len(legs)))
-    for j, (fw, (cell, _)) in enumerate(zip(windows, chosen, strict=True)):
-        first = fw.test_start - 1
-        last = windows[j + 1].test_start - 1 if j + 1 < len(windows) else fw.test_end
-        if cell is not None:
-            w_star[first:last] = runs[cell].backtest.w.to_numpy()[first:last]
-    weights = pd.DataFrame(w_star, index=calendar, columns=legs)
+    weights = pd.DataFrame(_stitched_weights(runs, windows, selected), index=calendar, columns=legs)
     d = backtester.daily_returns(
         w=weights, R=own.returns[legs], rf=rf, cost_bps=params.cost_bps, borrow_bps=params.borrow_bps
     )
@@ -1022,17 +1015,8 @@ def run_walk_forward(
     # 5. Outputs: the stitched series, the request's own configuration and the benchmark, on [e, stop).
     win = slice(e, stop)
     market_excess = own.returns[MARKET] - rf
-    stitched_metrics = metrics.segment_metrics(
-        total=d.total.iloc[win],
-        excess=d.excess.iloc[win],
-        market_excess=market_excess.iloc[win],
-        held=stitched_held[win],
-        gross_held=d.gross_held.iloc[win],
-        turnover=d.turnover.iloc[win],
-        cost=d.cost.iloc[win],
-        borrow=d.borrow.iloc[win],
-        trades=None,  # positions span configurations, so there are no trades to count
-    )
+    # Positions span configurations, so there are no trades to count.
+    stitched_metrics = _daily_metrics(d, stitched_held, win, market_excess, trades=None)
     fixed_stop = min(stop, own.backtest.stop)  # the request's own run ends at its ruin day, if any
     fixed_metrics = _fixed_metrics(own, e, fixed_stop, market_excess) if fixed_stop > e else None
     bench = benchmark_returns(own.returns, params)  # §6.4
@@ -1052,7 +1036,6 @@ def run_walk_forward(
         },
         index=calendar[e - 1 : stop],
     )
-    selected = [cell for cell, _ in chosen]
     warnings = metrics.walk_forward_warnings(
         selected=selected,
         test_windows=[(calendar[fw.test_start], calendar[fw.test_end - 1]) for fw in windows],
@@ -1076,6 +1059,21 @@ def run_walk_forward(
         e=e,
         stop=stop,
     )
+
+
+def _stitched_weights(
+    runs: dict[Cell, StrategyRun], windows: list[FoldWindow], selected: list[Cell | None]
+) -> np.ndarray:
+    """§9.2 step 4: the executed weights w*. Fold j's choice rules the closes [b_j - 1, b_{j+1} - 1),
+    the last fold's through the end of its test window; a fold with no choice is flat."""
+    first_run = next(iter(runs.values())).backtest.w
+    w_star = np.zeros(first_run.shape)
+    for j, (fw, cell) in enumerate(zip(windows, selected, strict=True)):
+        first = fw.test_start - 1
+        last = windows[j + 1].test_start - 1 if j + 1 < len(windows) else fw.test_end
+        if cell is not None:
+            w_star[first:last] = runs[cell].backtest.w.to_numpy()[first:last]
+    return w_star
 
 
 def select_configuration(
@@ -1119,16 +1117,27 @@ def _fixed_metrics(run: StrategyRun, start: int, stop: int, market_excess: pd.Se
     first, last = calendar[start], calendar[stop - 1]
     trades = bt.trades.loc[(bt.trades["entry_date"] >= first) & (bt.trades["entry_date"] <= last)].copy()
     trades["open"] = trades["open"] | (trades["exit_date"] > last)
-    sl = slice(start, stop)
+    return _daily_metrics(bt, bt.held.to_numpy(), slice(start, stop), market_excess, trades)
+
+
+def _daily_metrics(
+    daily: BacktestResult | backtester.DailyReturns,
+    held: np.ndarray,
+    sl: slice,
+    market_excess: pd.Series,
+    trades: pd.DataFrame | None,
+) -> Metrics:
+    """§8 metrics of a backtest's daily series (or the walk-forward's stitched one) on the
+    calendar positions sl. held marks the days a position earns its P&L, on the whole calendar."""
     return metrics.segment_metrics(
-        total=bt.total.iloc[sl],
-        excess=bt.excess.iloc[sl],
+        total=daily.total.iloc[sl],
+        excess=daily.excess.iloc[sl],
         market_excess=market_excess.iloc[sl],
-        held=bt.held.iloc[sl],
-        gross_held=bt.gross_held.iloc[sl],
-        turnover=bt.turnover.iloc[sl],
-        cost=bt.cost.iloc[sl],
-        borrow=bt.borrow.iloc[sl],
+        held=held[sl],
+        gross_held=daily.gross_held.iloc[sl],
+        turnover=daily.turnover.iloc[sl],
+        cost=daily.cost.iloc[sl],
+        borrow=daily.borrow.iloc[sl],
         trades=trades,
     )
 

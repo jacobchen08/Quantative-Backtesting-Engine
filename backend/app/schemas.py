@@ -14,23 +14,21 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
 from app.services import calendar
-from app.services.pipeline import StrategyParams
+from app.services.monte_carlo import MAX_BLOCK_LEN, MAX_SEED
+from app.services.pipeline import MAX_GRID_VALUES, PORTFOLIO_LEGS, StrategyParams
 
 TICKER = re.compile(r"^[A-Z0-9.^=-]{1,15}$")
 EARLIEST_START = dt.date(1990, 1, 1)
 L_RANGE = {"mean_reversion": (10, 252), "pairs": (10, 252), "trend": (21, 504), "trend_portfolio": (21, 504)}
 L_DEFAULT = {"mean_reversion": 60, "pairs": 60, "trend": 252, "trend_portfolio": 252}
-PORTFOLIO_LEGS = (2, 12)  # distinct tickers in a trend portfolio (§5.8)
 VOL_TARGET_RANGE = (0.01, 0.5)  # annualized, for the optional overlay (§5.6)
 PORTFOLIO_VOL_TARGET_RANGE = (0.05, 0.6)  # per asset, for the trend portfolio (§5.8)
 PORTFOLIO_VOL_TARGET_DEFAULT = 0.40
-MAX_GRID_VALUES = 8
 MAX_PATH_CELLS = 12_700_000  # n_paths * (horizon + 1); keeps Monte Carlo near 200 MB
-MAX_SEED = 2**53  # JavaScript loses integer precision above this
 
 Strategy = Literal["mean_reversion", "pairs", "trend", "trend_portfolio"]
 RiskFree = Literal["tbill"] | Annotated[float, Field(ge=-0.01, le=0.25)]
-BlockLen = Literal["auto"] | Annotated[int, Field(ge=1, le=63)]
+BlockLen = Literal["auto"] | Annotated[int, Field(ge=1, le=MAX_BLOCK_LEN)]
 
 
 def _not_applicable(strategy: object, vol_target: object, pairs_model: object) -> set[str]:

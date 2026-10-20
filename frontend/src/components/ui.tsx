@@ -136,3 +136,30 @@ export function AsyncNotice<T>(props: { state: Async<T>; what: string; errorTitl
       return null
   }
 }
+
+/** A chart's caption, with its legend on the right. */
+export function ChartTitle(props: { children: ReactNode; legend?: ReactNode }) {
+  return (
+    <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 text-[11px] text-neutral-500">
+      <span className="tracking-widest uppercase">{props.children}</span>
+      {props.legend && <span className="flex flex-wrap gap-x-3">{props.legend}</span>}
+    </div>
+  )
+}
+
+/** One legend entry: a line sample (solid or dashed) or a glyph, in the series' colour. */
+export function Key(props: { color: string; children: ReactNode; dashed?: boolean; glyph?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {props.glyph ? (
+        <span style={{ color: props.color }}>{props.glyph}</span>
+      ) : (
+        <span
+          className="inline-block w-4"
+          style={{ borderTop: `${props.dashed ? '1px dashed' : '2px solid'} ${props.color}` }}
+        />
+      )}
+      {props.children}
+    </span>
+  )
+}
