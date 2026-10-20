@@ -1,0 +1,59 @@
+name: Pages
+
+# The static demo (CLAUDE.md §13, "Static demo"): the dashboard built with VITE_DEMO=1, replaying
+# the responses recorded in frontend/public/demo/ by backend/scripts/record_demo.py. It needs no
+# backend, so GitHub Pages can host it.
+#
+# Deploying publishes series derived from Yahoo Finance data, whose terms restrict redistribution.
+# The deploy job stays off until the repository's owner decides that question (§13); the build job
+# still runs, so the demo build is checked on every push to main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_DEMO: "1"
+          DEMO_BASE: /${{ github.event.repository.name }}/ # served at https://<owner>.github.io/<repository>/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+  deploy:
+    # Off until the data-licence decision (§13). Deleting this line turns deployment on; Pages must
+    # also be set to deploy from GitHub Actions (Settings > Pages > Source).
+    if: false
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

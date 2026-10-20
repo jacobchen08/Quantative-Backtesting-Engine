@@ -19,9 +19,10 @@ export function percentField(x: number): string {
  *
  * Fields an older engine didn't store come back null (§11.4). Each such field was added with a
  * default equal to the earlier behaviour, so a null loads as that default: no borrow fee, shorts
- * allowed, and the rolling-OLS pairs model.
+ * allowed, and the rolling-OLS pairs model. A field left out (the static demo passes a request,
+ * not a resolved run) is read the same way as a null.
  */
-export function resolvedToForm(r: StoredRun['resolved'], current: FormState): FormState {
+export function resolvedToForm(r: Partial<StoredRun['resolved']>, current: FormState): FormState {
   const strategy = r.strategy ?? current.strategy
   const form: FormState = { ...withStrategy(current, strategy) }
   const tickers = r.tickers ?? []

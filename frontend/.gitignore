@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 dist-e2e
+dist-demo
 
 # Playwright
 test-results

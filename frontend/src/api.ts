@@ -1,6 +1,8 @@
 // Typed fetch wrappers for the API's endpoints (§11.1): four POSTs and, from Phase 8, the GETs of
 // the health check and the run history (§11.4). Every error the API returns is
 // {"detail": "..."}; ApiError carries that string so the views can show it verbatim (§13).
+// In the static demo (Phase 9) the four POSTs are replayed from recorded responses instead (demo.ts).
+import { DEMO, replay } from './demo'
 import type {
   BacktestRequest,
   BacktestResponse,
@@ -73,18 +75,22 @@ function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 export function postBacktest(request: BacktestRequest, signal?: AbortSignal): Promise<BacktestResponse> {
+  if (DEMO) return replay('backtest', request, signal)
   return post('/api/backtest', request, signal)
 }
 
 export function postSensitivity(request: SensitivityRequest, signal?: AbortSignal): Promise<SensitivityResponse> {
+  if (DEMO) return replay('sensitivity', request, signal)
   return post('/api/sensitivity', request, signal)
 }
 
 export function postMonteCarlo(request: MonteCarloRequest, signal?: AbortSignal): Promise<MonteCarloResponse> {
+  if (DEMO) return replay('monte_carlo', request, signal)
   return post('/api/monte-carlo', request, signal)
 }
 
 export function postWalkForward(request: WalkForwardRequest, signal?: AbortSignal): Promise<WalkForwardResponse> {
+  if (DEMO) return replay('walk_forward', request, signal)
   return post('/api/walk-forward', request, signal)
 }
 

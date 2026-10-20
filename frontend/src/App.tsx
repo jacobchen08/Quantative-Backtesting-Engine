@@ -2,7 +2,11 @@
 // backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel. The
 // walk-forward goes out only from its own panel's button. The settings live in the URL (Phase 8):
 // loading a URL fills the sidebar without sending anything, and each Run writes them back.
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
+//
+// The static demo (Phase 9) is this same dashboard with `demo` set: the sidebar offers only the
+// recorded scenarios, requests are replayed (demo.ts), a banner dates the recording, the run history
+// is hidden, and the chosen scenario is shown at once, since a replay costs nothing.
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
 import { EquityPanel, PortfolioSignalPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
 import { CalendarPanel } from './components/CalendarPanel'
@@ -16,6 +20,7 @@ import { Sidebar } from './components/Sidebar'
 import { TradesTable } from './components/TradesTable'
 import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
 import { WalkForwardPanel } from './components/WalkForwardPanel'
+import { matchScenario, scenarioForm, type DemoManifest, type DemoScenario } from './demo'
 import { buildRequests, buildWalkForward, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
 import { resolvedToForm } from './history'
 import { failure, type Async } from './state'
@@ -31,7 +36,7 @@ import type {
 } from './types'
 import { formToSearch, searchToForm } from './urlState'
 
-function RunHeader(props: { bt: BacktestResponse }) {
+function RunHeader(props: { bt: BacktestResponse; demo: boolean }) {
   const { bt } = props
   const r = bt.resolved
   return (
@@ -41,8 +46,9 @@ function RunHeader(props: { bt: BacktestResponse }) {
         {r.tickers.join(r.strategy === 'trend_portfolio' ? ', ' : ' / ')}
       </h2>
       <p className="text-xs text-neutral-500">
-        {r.start} → {r.end} · L {r.L} · first evaluated {r.first_evaluated_date} · split {r.split_date} · run #{bt.run_id} ·
-        engine {bt.engine_version}
+        {r.start} → {r.end} · L {r.L} · first evaluated {r.first_evaluated_date} · split {r.split_date} ·{' '}
+        {/* the demo's run ids belong to the recorder's scratch database, not to any history */}
+        {props.demo ? 'recorded' : `run #${bt.run_id}`} · engine {bt.engine_version}
       </p>
     </div>
   )
@@ -94,15 +100,34 @@ function Notices(props: { notices: string[]; onDismiss: () => void }) {
   )
 }
 
-/** The sidebar defaults: today is the default end date, so they are rebuilt where they are needed. */
-function defaults(): FormState {
-  return defaultForm(isoDate(new Date()))
+/**
+ * The sidebar defaults: today is the default end date, so they are rebuilt where they are needed.
+ * In the demo they are the first recorded scenario, so its URL is the bare page.
+ */
+function defaults(demo: DemoManifest | null): FormState {
+  return demo ? scenarioForm(demo.scenarios[0]) : defaultForm(isoDate(new Date()))
 }
 
 /** The page URL with the settings that differ from the defaults (§13), keeping the path and hash. */
-function urlFor(form: FormState): string {
+function urlFor(form: FormState, demo: DemoManifest | null): string {
   const { pathname, hash } = window.location
-  return `${pathname}${formToSearch(form, defaults())}${hash}`
+  return `${pathname}${formToSearch(form, defaults(demo))}${hash}`
+}
+
+/** The demo's banner (§13, "Static demo"). */
+function DemoBanner(props: { demo: DemoManifest }) {
+  return (
+    <div role="status" className="rounded border border-violet-900 bg-violet-950/30 px-3 py-2 text-sm text-violet-200">
+      Demo: results recorded on {props.demo.recorded_on} from Yahoo data through {props.demo.data_end}. Run locally for
+      live data.{' '}
+      <a
+        className="text-violet-400 underline hover:text-violet-200"
+        href="https://github.com/jacobchen08/Quantative-Backtesting-Engine#readme"
+      >
+        Source and setup
+      </a>
+    </div>
+  )
 }
 
 function EmptyState() {
@@ -119,14 +144,16 @@ function EmptyState() {
   )
 }
 
-export default function App() {
+export default function App(props: { demo?: DemoManifest | null }) {
+  const demo = props.demo ?? null
   // The URL fills the sidebar on load and sends nothing (§13); its ignored parameters become notices.
-  const [initial] = useState(() => searchToForm(window.location.search, defaults()))
+  const [initial] = useState(() => searchToForm(window.location.search, defaults(demo)))
   const [form, setForm] = useState<FormState>(initial.form)
   const [notices, setNotices] = useState<string[]>(initial.notices)
   const [formError, setFormError] = useState<string | null>(null)
   const [lastRun, setLastRun] = useState<FormState | null>(null)
-  const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: 'idle' })
+  // The demo shows its scenario on load (the effect below), so it starts as loading, not empty.
+  const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: demo ? 'loading' : 'idle' })
   const [sensitivity, setSensitivity] = useState<Async<SensitivityResponse>>({ status: 'idle' })
   const [monteCarlo, setMonteCarlo] = useState<Async<MonteCarloResponse>>({ status: 'idle' })
   const [walkForward, setWalkForward] = useState<Async<WalkForwardResponse>>({ status: 'idle' })
@@ -138,19 +165,19 @@ export default function App() {
   const inFlight = useRef<AbortController | null>(null)
   const walkForwardInFlight = useRef<AbortController | null>(null)
 
-  async function run() {
-    const built = buildRequests(form)
+  async function run(settings: FormState = form) {
+    const built = buildRequests(settings)
     if (!built.ok) {
       setFormError(built.error)
       return
     }
     setFormError(null)
-    window.history.replaceState(null, '', urlFor(form)) // settings only, never results
+    window.history.replaceState(null, '', urlFor(settings, demo)) // settings only, never results
     inFlight.current?.abort() // a newer run replaces any request still in flight
     const controller = new AbortController()
     inFlight.current = controller
     const { signal } = controller
-    setLastRun(form)
+    setLastRun(settings)
     setBacktest({ status: 'loading' })
     setSensitivity({ status: 'loading' })
     setMonteCarlo({ status: 'loading' })
@@ -209,6 +236,23 @@ export default function App() {
     return !built.ok || JSON.stringify(built.request) !== walkForwardSent
   }, [walkForward, walkForwardSent, form])
 
+  // The demo replays its first scenario (or the URL's) on load; the live dashboard waits for Run.
+  const runOnLoad = useRef(demo !== null)
+  useEffect(() => {
+    if (!runOnLoad.current) return
+    runOnLoad.current = false
+    void run(initial.form)
+  })
+
+  // The demo's scenario picker: a replay is instant, so choosing a scenario shows it.
+  function onPickScenario(scenario: DemoScenario) {
+    const settings = scenarioForm(scenario)
+    setForm(settings)
+    setNotices([])
+    void run(settings)
+  }
+  const activeScenario = useMemo(() => (demo ? matchScenario(form, demo.scenarios) : null), [demo, form])
+
   const onUseSeed = useCallback((seed: number) => setForm((f) => ({ ...f, mcSeed: String(seed) })), [])
 
   // "Load settings" fills the sidebar from a stored run without running it (§13 view 12).
@@ -258,7 +302,7 @@ export default function App() {
     )
     content = (
       <>
-        <RunHeader bt={bt} />
+        <RunHeader bt={bt} demo={demo !== null} />
         <ExportBar backtest={bt} />
         <Warnings warnings={bt.warnings} />
         {guard(
@@ -328,14 +372,19 @@ export default function App() {
         running={running}
         formError={formError}
         stale={stale}
+        demo={demo && { scenarios: demo.scenarios, active: activeScenario, onPick: onPickScenario }}
       />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[1600px] space-y-4 p-6">
+          {demo && <DemoBanner demo={demo} />}
           <Notices notices={notices} onDismiss={() => setNotices([])} />
           {content}
-          <ErrorBoundary title="Run history">
-            <RunHistoryPanel reloadKey={historyKey} onLoadSettings={onLoadSettings} />
-          </ErrorBoundary>
+          {/* The demo has no database, so no history (§13). */}
+          {!demo && (
+            <ErrorBoundary title="Run history">
+              <RunHistoryPanel reloadKey={historyKey} onLoadSettings={onLoadSettings} />
+            </ErrorBoundary>
+          )}
         </div>
       </main>
     </div>

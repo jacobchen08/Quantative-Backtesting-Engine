@@ -104,8 +104,8 @@ quant-engine/
     tests/                   # §12
     tests/synthetic.py       # the synthetic-market generator, shared by conftest.py and seed_e2e.py
   frontend/                  # Vite React-TS app (§13)
-    playwright.config.ts     # Phase 8: the browser tests' two servers (§12, "Browser tests")
-    e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests")
+    playwright.config.ts     # Phase 8: the browser tests' servers (§12, "Browser tests")
+    e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests"); demo.spec.ts (Phase 9)
     scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
     public/demo/             # Phase 9: recorded responses for the static demo
   docs/METHODOLOGY.md        # §15
@@ -122,10 +122,10 @@ quant-engine/
   - backend lint and tests on Python 3.12 and 3.14;
   - frontend `npm ci`, lint, `vitest run`, and `npm run build`;
   - from Phase 8, a browser-test job on Ubuntu (§12, "Browser tests"). It installs Chromium with `npx playwright install --with-deps chromium`, seeds the offline database, and runs `npx playwright test`.
-- **Pages (Phase 9):** `pages.yml` builds the frontend with `VITE_DEMO=1` and deploys `dist/` to GitHub Pages on every push to `main`.
+- **Pages (Phase 9):** `pages.yml` builds the frontend with `VITE_DEMO=1` and deploys `dist/` to GitHub Pages on every push to `main`. Its deploy job has `if: false` until the user answers the data-licence question (§13, "Static demo"); the build job runs regardless.
 - **Config files:**
   - `.env.example` lists every environment variable with its default.
-  - `.gitignore` covers `.venv/`, `node_modules/`, `*.db`, `__pycache__/`, `.env` and `dist/`; from Phase 8 also `dist-e2e/` and Playwright's `test-results/` and `playwright-report/`.
+  - `.gitignore` covers `.venv/`, `node_modules/`, `*.db`, `__pycache__/`, `.env` and `dist/`; from Phase 8 also `dist-e2e/` and Playwright's `test-results/` and `playwright-report/`; from Phase 9 `dist-demo/`.
 
 ## 4. Data Layer
 
@@ -1331,11 +1331,12 @@ Keep the Phase 3 mutation check: before each phase ends, inject deliberate bugs 
 
 ### Browser tests (Playwright; Phase 8)
 These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never against the network.
-- **Setup.** `playwright.config.ts` uses `webServer` to start two servers:
+- **Setup.** `playwright.config.ts` uses `webServer` to start two servers, and a third from Phase 9:
   - uvicorn on port 8001 with `QUANT_OFFLINE=1` and a `DATABASE_URL` pointing at a temporary SQLite file that `backend/scripts/seed_e2e.py` has filled with the synthetic market and coverage rows. The tickers `SYNY`, `SYNX` (a cointegrated pair) and `SYNT` (a trending asset), with SPY and ^IRX, cover 2012-01-03 to 2019-12-31, and every request ends by then, so every price read is a cache hit;
-  - `vite preview` on port 4173, on a fresh build in `dist-e2e/` whose `VITE_API_URL` points at port 8001 (the API's `CORS_ORIGINS` allows 4173).
+  - `vite preview` on port 4173, on a fresh build in `dist-e2e/` whose `VITE_API_URL` points at port 8001 (the API's `CORS_ORIGINS` allows 4173);
+  - from Phase 9, `vite preview --mode demo` on port 4174, on a fresh demo build in `dist-demo/`, served under its GitHub Pages path.
 
-  Neither server is reused, so the tests never touch a developer's servers on 8000 and 5173. They share the one database and run one at a time.
+  No server is reused, so the tests never touch a developer's servers on 8000 and 5173. They share the one database and run one at a time.
 - **Tests:**
   - a pairs run renders every panel, with no console errors;
   - a trend run shows the single-row heatmap;
@@ -1347,6 +1348,7 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
   - the URL round-trips the settings without sending a request on load;
   - an invalid URL parameter is ignored with a notice naming it (Phase 8 addition);
   - Run is not blocked by the browser's own form validation: an off-step value reaches the API, and an out-of-range one gets its 422 (Phase 8 addition).
+  - **Static demo (Phase 9),** with no request outside the demo's own files and no console errors: the first scenario replays on load, with the banner, no run history and a read-only sidebar; every scenario replays, with its walk-forward; a scenario's URL reopens it; a configuration that wasn't recorded shows the demo's message.
 - These tests are outside pytest's 60 s budget (§14).
 - `npm run screenshots` (`frontend/scripts/screenshots.ts`, run by Node's built-in TypeScript support) uses Playwright against the dev servers on 8000 and 5173 with real data, to regenerate every file in `docs/screenshots/`. It sets each scenario up through the URL. It needs the network, so it never runs in CI.
 
@@ -1467,11 +1469,11 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
 
 ### Static demo (Phase 9)
 A read-only build of the dashboard that runs without a backend. It is deployed to GitHub Pages so reviewers can see the project without installing it.
-- **Build.** `VITE_DEMO=1 npm run build`, with Vite's `base` set to the repository path, e.g. `/quant-engine/`.
-- **Replay.** In demo mode, `api.ts` swaps its fetch wrappers for a replay module. It looks up `public/demo/manifest.json`, which maps a canonical request key to a recorded response file. The key is the request's JSON with sorted keys.
+- **Build.** `VITE_DEMO=1 npm run build`, or `npm run build:demo` (`vite build --mode demo`, which works in PowerShell), with Vite's `base` set to the repository path: `/Quantative-Backtesting-Engine/` by default, or `DEMO_BASE`, which `pages.yml` sets from the repository's name. Other builds leave `public/demo/` out of their output.
+- **Replay.** In demo mode, `api.ts` swaps its fetch wrappers for a replay module (`src/demo.ts`). It looks up `public/demo/manifest.json`, which maps a canonical request key to a recorded response file, in one table per endpoint, because the backtest and the sensitivity grid send the same body. The key is the request's JSON with sorted keys; the dashboard re-serializes the manifest's keys before comparing, so number formatting (Python's 2.0, JavaScript's 2) can't break a match. The manifest also holds the recording date, the last data date, the engine version and each scenario's requests.
   - A request that isn't recorded shows "This configuration isn't in the demo. Run the project locally for live data."
-  - Run history is hidden in demo mode.
-- **Scenarios.** The sidebar offers only the recorded scenarios, through a scenario picker, and the other inputs are read-only. The scenarios are:
+  - Run history is hidden in demo mode, and the run header shows "recorded" instead of a run id.
+- **Scenarios.** The sidebar offers only the recorded scenarios, through a scenario picker, and the other inputs are read-only. A replay is instant, so the first scenario (or the URL's) is shown on load and choosing a scenario shows it. URL state works as live, with the first scenario as the defaults. The scenarios use 2015-01-01 to 2025-12-31 and the dashboard's default settings otherwise, and are:
   - pairs KO/PEP, XOM/CVX, GOOGL/GOOG and NVDA/AMD;
   - mean reversion on KO;
   - trend on SPY, with the vol target off and on;
@@ -1480,6 +1482,8 @@ A read-only build of the dashboard that runs without a backend. It is deployed t
   Each scenario includes its sensitivity, walk-forward and Monte Carlo (seed 42).
 - **Banner.** It reads: "Demo: results recorded on {date} from Yahoo data through {end}. Run locally for live data."
 - **Recording.** `backend/scripts/record_demo.py` calls the API in-process (FastAPI's `TestClient`) on the local price cache for the fixed scenario list, with fixed dates and seed, and writes the JSON files and the manifest. The total size must stay under 10 MB: report the size, and if it's over, ask before trimming scenarios.
+  - It first caches any missing prices in the real cache, as the API would (`QUANT_OFFLINE=1` forbids that), then sends the requests to a temporary copy of the cache with the run history emptied, so it adds no runs to the history.
+  - The response bodies are written byte for byte.
 - **Data licence. Ask before the first deployment.** Yahoo's terms restrict redistributing its data. The recorded responses hold derived series, and `benchmark_equity` is a rescaled adjusted price. Whether publishing them is acceptable is the user's decision. Until the user says yes, `pages.yml` exists but its deploy job doesn't run.
 
 ## 14. Non-Functional Requirements

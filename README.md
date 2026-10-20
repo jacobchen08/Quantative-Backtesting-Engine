@@ -19,7 +19,7 @@ The dashboard keeps a history of every backtest, with side-by-side comparison an
 
 - **Specification:** [CLAUDE.md](CLAUDE.md), the source of truth for every formula and rule.
 - **Methodology:** [docs/METHODOLOGY.md](docs/METHODOLOGY.md) justifies each formula, lists the limitations, and records every approved deviation from the specification.
-- **Status:** Phases 0–8 are done: the engine, the API, the dashboard, the documentation and the benchmarks, then costs and robustness metrics, walk-forward analysis, the Kalman pairs model, the trend portfolio and the stationary bootstrap, and run history, URL state, CSV export, the log scale, offline mode and browser tests. Phase 9, a static demo, is specified in CLAUDE.md §16 but not built yet.
+- **Status:** Phases 0–9 are done: the engine, the API, the dashboard, the documentation and the benchmarks, then costs and robustness metrics, walk-forward analysis, the Kalman pairs model, the trend portfolio and the stationary bootstrap, run history, URL state, CSV export, the log scale, offline mode and browser tests, and a [static demo](#static-demo). The demo is built and tested but not deployed yet.
 
 ![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
 
@@ -56,6 +56,25 @@ Prices are downloaded from Yahoo Finance on first use and cached in `backend\qua
 
 The sidebar's settings are written to the URL when you press Run, so the link reproduces the run; opening a link fills the sidebar and sends nothing until you press Run. **Run history**, at the bottom of the page, lists every stored backtest. "Load settings" puts a run's settings back in the sidebar, and ticking up to four runs compares their metrics.
 
+## Static demo
+
+A read-only build of the dashboard for GitHub Pages, which replays recorded API responses and needs no backend. It has eight scenarios: pairs on KO/PEP, XOM/CVX, GOOGL/GOOG and NVDA/AMD, mean reversion on KO, SPY trend with the volatility target off and on, and the trend portfolio of SPY, QQQ, GLD and TLT. Each runs 2015-01-01 to 2025-12-31 with the default settings, and includes its sensitivity grid, walk-forward and Monte Carlo (seed 42). The sidebar is read-only apart from a scenario picker. How the replay works is in METHODOLOGY [§33](docs/METHODOLOGY.md).
+
+**Not deployed yet.** The recorded series are derived from Yahoo Finance data, and publishing them waits on a decision about redistributing that data (CLAUDE.md §13). Until then `.github/workflows/pages.yml` builds the demo on every push to `main` but doesn't deploy it. Once deployed it will be at https://jacobchen08.github.io/Quantative-Backtesting-Engine/.
+
+The current recording, in `frontend\public\demo`, was made on 2026-10-20 from data through 2025-12-31: 33 files, 8.65 MB, against a 10 MB limit.
+
+```powershell
+# Re-record. Downloads any prices missing from backend\quant.db first; adds nothing to the run history.
+cd backend
+.venv\Scripts\python.exe scripts\record_demo.py
+
+# Build the demo and serve it at http://localhost:4173/Quantative-Backtesting-Engine/
+cd ..\frontend
+npm run build:demo
+npm run preview:demo
+```
+
 ## Tests and linters
 
 ```powershell
@@ -80,7 +99,7 @@ npx playwright install chromium   # once
 npx playwright test
 ```
 
-Playwright starts its own two servers and stops them afterwards: the API on port 8001, offline, on a temporary database that `backend\scripts\seed_e2e.py` fills with the synthetic market (tickers SYNY, SYNX, SYNT and SPY, 2012–2019), and a fresh production build on port 4173. Nothing reaches the network, and dev servers on 8000 and 5173 are left alone. The 10 tests took 43.4 s here (`npx playwright test` on 2026-10-19, including the build). CI runs them on Ubuntu.
+Playwright starts its own three servers and stops them afterwards: the API on port 8001, offline, on a temporary database that `backend\scripts\seed_e2e.py` fills with the synthetic market (tickers SYNY, SYNX, SYNT and SPY, 2012–2019); a fresh production build on port 4173; and a fresh build of the [static demo](#static-demo) on port 4174. Nothing reaches the network, and dev servers on 8000 and 5173 are left alone. The 14 tests took 69.7 s here (`npx playwright test` in PowerShell on 2026-10-20, including both builds). CI runs them on Ubuntu.
 
 ## Benchmarks
 
