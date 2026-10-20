@@ -22,6 +22,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 from yfinance.exceptions import YFRateLimitError
 
+from app.config import offline_mode
 from app.models import HistoricalPrice, TickerCoverage
 from app.services import calendar
 from app.services.backtester import InsufficientDataError
@@ -196,7 +197,13 @@ def _set_coverage(session: Session, ticker: str, start: dt.date, end: dt.date) -
 
 
 def _download(ticker: str, start: dt.date, end: dt.date, requested: tuple[dt.date, dt.date]) -> pd.DataFrame:
-    """fetch_from_yahoo with the §4.3 error mapping. Called once per ticker per request at most."""
+    """fetch_from_yahoo with the §4.3 error mapping. Called once per ticker per request at most.
+
+    In offline mode (QUANT_OFFLINE=1) a cache miss raises 503 here, before the network seam is
+    called, so the browser tests can never reach Yahoo (§4.3).
+    """
+    if offline_mode():
+        raise DataSourceError(503, f"Offline mode: {ticker} is not in the local cache")
     try:
         raw = fetch_from_yahoo(ticker, start, end)
     except YFRateLimitError as exc:

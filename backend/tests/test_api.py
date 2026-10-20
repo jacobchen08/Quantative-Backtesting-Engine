@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,13 +14,21 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from yfinance.exceptions import YFRateLimitError
 
 from app import __version__
+from app.database import Base, get_session, make_engine
 from app.main import app, diagnostics_cache
 from app.models import BacktestRun
-from app.schemas import BacktestResponse, MonteCarloResponse, SensitivityResponse, WalkForwardResponse
+from app.schemas import (
+    BacktestResponse,
+    MonteCarloResponse,
+    RunDetail,
+    RunSummary,
+    SensitivityResponse,
+    WalkForwardResponse,
+)
 from app.serialization import to_jsonable
 from app.services import stats
 
@@ -634,3 +644,153 @@ def test_monte_carlo_with_automatic_block_length(client: TestClient) -> None:
             "block_len"
             in post(client, "/api/monte-carlo", {**request, "block_len": bad}, status=422)["detail"]
         )
+
+
+# ---------------------------------------------------------------- run history (§11.4)
+
+
+def test_runs_are_listed_newest_first_and_honour_limit(client: TestClient) -> None:
+    base = {"start": START, "end": END}
+    ids = [
+        post(client, "/api/backtest", {**base, "strategy": "pairs", "tickers": ["Y", "X"]})["run_id"],
+        post(client, "/api/backtest", {**base, "strategy": "trend", "tickers": ["SPY"]})["run_id"],
+        post(client, "/api/backtest", {**base, "strategy": "mean_reversion", "tickers": ["Y"]})["run_id"],
+    ]
+    runs = parse(client.get("/api/runs"))
+    assert [r["id"] for r in runs] == ids[::-1]
+    for run in runs:
+        RunSummary.model_validate(run)
+        assert dt.datetime.fromisoformat(run["created_at"]).utcoffset() == dt.timedelta(0)
+    assert [r["strategy"] for r in runs] == ["mean_reversion", "trend", "pairs"]
+    assert runs[2]["tickers"] == ["Y", "X"] and (runs[2]["start"], runs[2]["end"]) == (START, END)
+    assert [r["id"] for r in parse(client.get("/api/runs?limit=2"))] == ids[:0:-1]
+    for bad in (0, 501):
+        response = client.get(f"/api/runs?limit={bad}")
+        assert response.status_code == 422 and "limit" in parse(response)["detail"]
+
+
+def test_run_summary_is_read_from_the_stored_metrics(client: TestClient) -> None:
+    out = post(
+        client, "/api/backtest", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    (summary,) = parse(client.get("/api/runs"))
+    assert summary["engine_version"] == __version__
+    assert summary["sharpe_full"] == out["metrics"]["full"]["sharpe"]
+    assert summary["sharpe_oos"] == out["metrics"]["oos"]["sharpe"]
+    assert summary["total_return_full"] == out["metrics"]["full"]["total_return"]
+    assert summary["max_drawdown_full"] == out["metrics"]["full"]["max_drawdown"]
+
+
+def test_run_detail_returns_the_stored_request_and_metrics(client: TestClient) -> None:
+    request = {
+        "strategy": "pairs",
+        "tickers": ["Y", "X"],
+        "start": START,
+        "end": END,
+        "pairs_model": "kalman",
+    }
+    out = post(client, "/api/backtest", request)
+    detail = parse(client.get(f"/api/runs/{out['run_id']}"))
+    RunDetail.model_validate(detail)
+    assert detail["id"] == out["run_id"] and detail["engine_version"] == __version__
+    assert detail["resolved"] == out["resolved"]
+    assert detail["metrics"] == out["metrics"]
+    assert detail["benchmark_metrics"] == out["benchmark_metrics"]
+    missing = client.get(f"/api/runs/{out['run_id'] + 1}")
+    assert missing.status_code == 404 and parse(missing) == {"detail": f"No run {out['run_id'] + 1}"}
+
+
+def test_a_run_stored_by_an_older_engine_reads_back_with_null_new_fields(
+    client: TestClient, db_engine: Engine
+) -> None:
+    out = post(
+        client, "/api/backtest", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    dropped = ("borrow_bps", "allow_short", "pairs_model")
+    resolved = {k: v for k, v in out["resolved"].items() if k not in dropped}
+
+    def without_borrow_drag(by_segment: dict) -> dict:
+        return {seg: {k: v for k, v in m.items() if k != "ann_borrow_drag"} for seg, m in by_segment.items()}
+
+    metrics = {"metrics": without_borrow_drag(out["metrics"]), "benchmark_metrics": out["benchmark_metrics"]}
+    with Session(db_engine) as s:
+        s.add(
+            BacktestRun(
+                created_at=dt.datetime(2026, 10, 16, 5, 4, 33, tzinfo=dt.UTC),
+                engine_version="0.0.9",
+                request_json=json.dumps(resolved),
+                metrics_json=json.dumps(metrics),
+            )
+        )
+        s.commit()
+        old_id = s.scalar(select(func.max(BacktestRun.id)))
+    detail = parse(client.get(f"/api/runs/{old_id}"))
+    RunDetail.model_validate(detail)
+    assert detail["engine_version"] == "0.0.9"
+    assert detail["created_at"] == "2026-10-16T05:04:33+00:00"
+    for field in dropped:
+        assert detail["resolved"][field] is None
+    for segment in ("is", "oos", "full"):
+        assert detail["metrics"][segment]["ann_borrow_drag"] is None
+        assert detail["metrics"][segment]["sharpe"] == out["metrics"][segment]["sharpe"]
+    with Session(db_engine) as s:  # the stored row is never rewritten
+        assert s.get(BacktestRun, old_id).request_json == json.dumps(resolved)
+    assert parse(client.get("/api/runs"))[0]["id"] == old_id
+
+
+# ---------------------------------------------------------------- offline mode (§4.3)
+
+
+def test_offline_mode_turns_a_cache_miss_into_503_without_a_download(
+    client: TestClient, fake_yahoo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    post(client, "/api/backtest", request)  # online: fills the cache
+    calls = len(fake_yahoo.calls)
+    monkeypatch.setenv("QUANT_OFFLINE", "1")
+    post(client, "/api/backtest", request)  # a cache hit still works offline
+    out = post(client, "/api/backtest", {**request, "tickers": ["Y", "T15"]}, status=503)
+    assert out["detail"] == "Offline mode: T15 is not in the local cache"
+    assert len(fake_yahoo.calls) == calls  # the network seam was never called
+    monkeypatch.setenv("QUANT_OFFLINE", "0")  # only "1" turns it on
+    post(client, "/api/backtest", {**request, "tickers": ["Y", "T15"]})
+    assert len(fake_yahoo.calls) == calls + 1
+
+
+def test_the_e2e_seed_serves_the_browser_tests_from_the_cache(
+    tmp_path: Path, fake_yahoo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scripts/seed_e2e.py writes a database on which the offline API answers from the cache (§12)."""
+    script = Path(__file__).parents[1] / "scripts" / "seed_e2e.py"
+    spec = importlib.util.spec_from_file_location("seed_e2e", script)
+    seed_e2e = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed_e2e)
+    path = tmp_path / "e2e.db"
+    path.write_text("stale")  # the script replaces whatever is there
+    monkeypatch.setenv("QUANT_OFFLINE", "1")  # as in playwright.config.ts: the seed must still write
+    counts = seed_e2e.seed(path)
+    assert set(counts) == {"SYNY", "SYNX", "SYNT", "SPY", "^IRX"}
+    engine = make_engine(f"sqlite:///{path.as_posix()}")
+    Base.metadata.create_all(engine)  # what the app's lifespan does; the tables already exist
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override() -> Any:
+        with factory() as s:
+            yield s
+
+    app.dependency_overrides[get_session] = override
+    diagnostics_cache.clear()
+    try:
+        client = TestClient(app)
+        dates = {"start": "2012-01-03", "end": "2019-12-31"}
+        post(client, "/api/backtest", {"strategy": "pairs", "tickers": ["SYNY", "SYNX"], **dates})
+        post(client, "/api/backtest", {"strategy": "trend", "tickers": ["SYNT"], **dates})
+        late = {"strategy": "trend", "tickers": ["SYNT"], **dates, "end": "2020-06-30"}
+        assert (
+            post(client, "/api/backtest", late, 503)["detail"]
+            == "Offline mode: SYNT is not in the local cache"
+        )
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        engine.dispose()
+    assert fake_yahoo.calls == []

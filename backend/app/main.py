@@ -12,10 +12,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import __version__
@@ -28,6 +29,8 @@ from app.schemas import (
     BacktestResponse,
     MonteCarloRequest,
     MonteCarloResponse,
+    RunDetail,
+    RunSummary,
     SensitivityRequest,
     SensitivityResponse,
     WalkForwardRequest,
@@ -181,3 +184,58 @@ def run_monte_carlo(request: MonteCarloRequest, session: SessionDep) -> dict[str
         has_exposure=has_exposure,
     )
     return monte_carlo_payload(result, request.resolved())
+
+
+# ---------------------------------------------------------------- run history (§11.4)
+
+
+def _utc_iso(created_at: dt.datetime) -> str:
+    """ISO 8601 in UTC. SQLite hands timezone-aware columns back naive, and they were written in UTC."""
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=dt.UTC)
+    return created_at.astimezone(dt.UTC).isoformat()
+
+
+@app.get("/api/runs", response_model=list[RunSummary])
+def list_runs(session: SessionDep, limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[dict[str, Any]]:
+    """Stored backtests, newest first, summarized from their stored JSON."""
+    rows = session.scalars(select(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit))
+    out = []
+    for row in rows:
+        resolved = json.loads(row.request_json)
+        metrics = json.loads(row.metrics_json)["metrics"]
+        full, oos = metrics["full"], metrics.get("oos")
+        out.append(
+            {
+                "id": row.id,
+                "created_at": _utc_iso(row.created_at),
+                "engine_version": row.engine_version,
+                "strategy": resolved["strategy"],
+                "tickers": resolved["tickers"],
+                "start": resolved["start"],
+                "end": resolved["end"],
+                "sharpe_full": full.get("sharpe"),
+                "sharpe_oos": None if oos is None else oos.get("sharpe"),
+                "total_return_full": full["total_return"],
+                "max_drawdown_full": full["max_drawdown"],
+            }
+        )
+    return out
+
+
+@app.get("/api/runs/{run_id}", response_model=RunDetail)
+def get_run(run_id: int, session: SessionDep) -> dict[str, Any]:
+    """One stored backtest: its resolved request and metrics. Fields an older engine didn't store
+    read back as null."""
+    row = session.get(BacktestRun, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No run {run_id}")
+    stored = json.loads(row.metrics_json)
+    return {
+        "id": row.id,
+        "created_at": _utc_iso(row.created_at),
+        "engine_version": row.engine_version,
+        "resolved": json.loads(row.request_json),
+        "metrics": stored["metrics"],
+        "benchmark_metrics": stored["benchmark_metrics"],
+    }

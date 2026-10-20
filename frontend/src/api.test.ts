@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { API_BASE, ApiError, errorDetail, postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
+import {
+  API_BASE,
+  ApiError,
+  errorDetail,
+  getHealth,
+  getRun,
+  getRuns,
+  postBacktest,
+  postMonteCarlo,
+  postSensitivity,
+  postWalkForward,
+} from './api'
 import type { BacktestRequest } from './types'
 
 const REQUEST: BacktestRequest = { strategy: 'pairs', tickers: ['KO', 'PEP'], start: '2015-01-02', end: '2025-12-31' }
@@ -95,5 +106,33 @@ describe('typed fetch wrappers', () => {
     const abort = new DOMException('The operation was aborted.', 'AbortError')
     stubFetch(abort)
     await expect(postBacktest(REQUEST, controller.signal)).rejects.toBe(abort)
+  })
+})
+
+describe('run history and health (GET, §11.4)', () => {
+  it('GETs the runs with a limit, with no body', async () => {
+    const fetchMock = stubFetch(json([{ id: 3 }]))
+    expect(await getRuns(20)).toEqual([{ id: 3 }])
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe(`${API_BASE}/api/runs?limit=20`)
+    expect(init?.method).toBe('GET')
+    expect(init?.body).toBeUndefined()
+    stubFetch(json([]))
+    await getRuns()
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${API_BASE}/api/runs?limit=50`)
+  })
+
+  it('GETs one run and the health check', async () => {
+    const run = stubFetch(json({ id: 9 }))
+    await getRun(9)
+    expect(run.mock.calls[0][0]).toBe(`${API_BASE}/api/runs/9`)
+    const health = stubFetch(json({ status: 'ok', engine_version: '0.1.0' }))
+    expect(await getHealth()).toEqual({ status: 'ok', engine_version: '0.1.0' })
+    expect(health.mock.calls[0][0]).toBe(`${API_BASE}/api/health`)
+  })
+
+  it("carries a 404's detail", async () => {
+    stubFetch(json({ detail: 'No run 9' }, 404, 'Not Found'))
+    await expect(getRun(9)).rejects.toMatchObject({ status: 404, message: 'No run 9' })
   })
 })

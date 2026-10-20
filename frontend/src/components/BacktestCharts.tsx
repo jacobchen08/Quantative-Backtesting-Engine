@@ -16,10 +16,10 @@ import {
   type DotItemDotProps,
 } from 'recharts'
 import { fmtMoney, fmtMonth, fmtMultiple, fmtNum, fmtPct, fmtRate } from '../format'
-import { fmtDelta, niceTicks, type BenchmarkLabels, type LegView, type SeriesRow } from '../transform'
+import { equityLogAxis, fmtDelta, niceTicks, type BenchmarkLabels, type LegView, type SeriesRow } from '../transform'
 import { AXIS_TICK, BACKTEST_SYNC_ID, CHART_MARGIN, COLORS, LEG_COLORS, TOOLTIP_STYLE } from '../theme'
 import type { BacktestResponse } from '../types'
-import { Panel, Toggle } from './ui'
+import { Panel, Segmented, Toggle } from './ui'
 
 const Y_WIDTH = 64 // the same on every synchronized chart, so their x positions line up
 
@@ -93,24 +93,58 @@ export function Key(props: { color: string; children: ReactNode; dashed?: boolea
 
 // ---------------------------------------------------------------- equity and drawdown
 
+const SCALES = [
+  { value: 'linear', label: 'Linear' },
+  { value: 'log', label: 'Log', title: 'Log scale: ticks at 1, 2 and 5 × 10^k dollars' },
+] as const
+
+/** Linear | Log for the equity axis (§13), disabled with a reason when the equity reaches 0. */
+function ScaleSwitch(props: { log: boolean; disabled: boolean; onChange: (log: boolean) => void }) {
+  const segmented = (
+    <Segmented
+      label="Equity scale"
+      value={props.log ? 'log' : 'linear'}
+      options={SCALES}
+      onChange={(v) => props.onChange(v === 'log')}
+    />
+  )
+  if (!props.disabled) return segmented
+  return (
+    <span className="inline-block" title="Log scale is unavailable: this run was ruined, so its equity reaches $0, which a log axis can't show.">
+      <fieldset disabled className="pointer-events-none opacity-40">
+        {segmented}
+      </fieldset>
+    </span>
+  )
+}
+
 export const EquityPanel = memo(function EquityPanel(props: {
   rows: SeriesRow[]
   firstOos: number
   benchmark: BenchmarkLabels
   showBenchmark: boolean
   onShowBenchmark: (show: boolean) => void
+  logScale: boolean
+  onLogScale: (log: boolean) => void
+  ruined: boolean
 }) {
   const { rows, firstOos, showBenchmark } = props
   // Round ticks down to the deepest drawdown (at least -1%, so a run that never lost still has an axis).
   const ddFloor = useMemo(() => Math.min(-0.01, ...rows.map((r) => r.drawdown ?? 0)), [rows])
+  // A log axis needs positive equity: a ruined run reaches 0, so the toggle is disabled there (§13).
+  const logAxis = useMemo(() => (props.ruined ? null : equityLogAxis(rows, showBenchmark)), [rows, showBenchmark, props.ruined])
+  const log = props.logScale && logAxis !== null
   return (
     <Panel
       title="Equity and drawdown"
       subtitle="Gaps before the baseline day are intentional: the arrays start before trading does."
       actions={
-        <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the chart and the KPI tiles">
-          {props.benchmark.name}
-        </Toggle>
+        <div className="flex items-center gap-2">
+          <ScaleSwitch log={log} disabled={logAxis === null} onChange={props.onLogScale} />
+          <Toggle pressed={showBenchmark} onChange={props.onShowBenchmark} title="Show or hide the benchmark in the chart and the KPI tiles">
+            {props.benchmark.name}
+          </Toggle>
+        </div>
       }
     >
       <ChartTitle
@@ -127,14 +161,28 @@ export const EquityPanel = memo(function EquityPanel(props: {
       <LineChart responsive width="100%" height={280} data={rows} syncId={BACKTEST_SYNC_ID} margin={CHART_MARGIN}>
         <CartesianGrid stroke={COLORS.grid} vertical={false} />
         {dateAxis()}
-        <YAxis
-          width={Y_WIDTH}
-          tick={AXIS_TICK}
-          stroke={COLORS.axis}
-          tickLine={false}
-          domain={['auto', 'auto']}
-          tickFormatter={(v: number) => fmtMoney(v, true)}
-        />
+        {log && logAxis ? (
+          <YAxis
+            width={Y_WIDTH}
+            tick={AXIS_TICK}
+            stroke={COLORS.axis}
+            tickLine={false}
+            scale="log"
+            domain={logAxis.domain}
+            ticks={logAxis.ticks}
+            allowDataOverflow
+            tickFormatter={(v: number) => fmtMoney(v, true)}
+          />
+        ) : (
+          <YAxis
+            width={Y_WIDTH}
+            tick={AXIS_TICK}
+            stroke={COLORS.axis}
+            tickLine={false}
+            domain={['auto', 'auto']}
+            tickFormatter={(v: number) => fmtMoney(v, true)}
+          />
+        )}
         <Tooltip {...TOOLTIP_STYLE} isAnimationActive={false} formatter={moneyTip} />
         {oosMarks(rows, firstOos, true)}
         <Line dataKey="equity" name="Strategy" stroke={COLORS.strategy} strokeWidth={1.5} dot={false} isAnimationActive={false} />

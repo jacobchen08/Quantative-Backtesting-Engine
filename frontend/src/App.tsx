@@ -1,20 +1,24 @@
 // Dashboard shell: the sidebar holds the settings, the main panel the views (§13). A Run sends the
 // backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel. The
-// walk-forward goes out only from its own panel's button.
+// walk-forward goes out only from its own panel's button. The settings live in the URL (Phase 8):
+// loading a URL fills the sidebar without sending anything, and each Run writes them back.
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ApiError, postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
+import { postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
 import { EquityPanel, PortfolioSignalPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
 import { CalendarPanel } from './components/CalendarPanel'
 import { CostSweepPanel } from './components/CostSweepPanel'
+import { ExportBar } from './components/ExportBar'
 import { KpiGrid } from './components/KpiGrid'
 import { MonteCarloPanel } from './components/MonteCarloPanel'
+import { RunHistoryPanel } from './components/RunHistoryPanel'
 import { SensitivityHeatmap } from './components/SensitivityHeatmap'
 import { Sidebar } from './components/Sidebar'
 import { TradesTable } from './components/TradesTable'
 import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
 import { WalkForwardPanel } from './components/WalkForwardPanel'
 import { buildRequests, buildWalkForward, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
-import type { Async } from './state'
+import { resolvedToForm } from './history'
+import { failure, type Async } from './state'
 import { assumptionLines, benchmarkLabels, firstOosIndex, legRows, seriesRows } from './transform'
 import type {
   BacktestResponse,
@@ -22,13 +26,10 @@ import type {
   ResolvedBacktestRun,
   SegmentKey,
   SensitivityResponse,
+  StoredRun,
   WalkForwardResponse,
 } from './types'
-
-function failure(error: unknown): { status: 'error'; detail: string; httpStatus: number } {
-  if (error instanceof ApiError) return { status: 'error', detail: error.message, httpStatus: error.status }
-  return { status: 'error', detail: error instanceof Error ? error.message : String(error), httpStatus: 0 }
-}
+import { formToSearch, searchToForm } from './urlState'
 
 function RunHeader(props: { bt: BacktestResponse }) {
   const { bt } = props
@@ -76,6 +77,34 @@ function AssumptionsFooter(props: { resolved: ResolvedBacktestRun }) {
   )
 }
 
+/** Notices about the sidebar's settings: URL parameters that were ignored, or a loaded run. */
+function Notices(props: { notices: string[]; onDismiss: () => void }) {
+  if (props.notices.length === 0) return null
+  return (
+    <div role="note" className="flex items-start justify-between gap-4 rounded border border-sky-900 bg-sky-950/30 px-3 py-2 text-sm text-sky-200">
+      <ul className="space-y-0.5">
+        {props.notices.map((n) => (
+          <li key={n}>{n}</li>
+        ))}
+      </ul>
+      <button type="button" onClick={props.onDismiss} className="text-xs text-sky-400 hover:text-sky-200">
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
+/** The sidebar defaults: today is the default end date, so they are rebuilt where they are needed. */
+function defaults(): FormState {
+  return defaultForm(isoDate(new Date()))
+}
+
+/** The page URL with the settings that differ from the defaults (§13), keeping the path and hash. */
+function urlFor(form: FormState): string {
+  const { pathname, hash } = window.location
+  return `${pathname}${formToSearch(form, defaults())}${hash}`
+}
+
 function EmptyState() {
   return (
     <div className="mt-24 max-w-xl space-y-2 text-sm text-neutral-400">
@@ -91,7 +120,10 @@ function EmptyState() {
 }
 
 export default function App() {
-  const [form, setForm] = useState<FormState>(() => defaultForm(isoDate(new Date())))
+  // The URL fills the sidebar on load and sends nothing (§13); its ignored parameters become notices.
+  const [initial] = useState(() => searchToForm(window.location.search, defaults()))
+  const [form, setForm] = useState<FormState>(initial.form)
+  const [notices, setNotices] = useState<string[]>(initial.notices)
   const [formError, setFormError] = useState<string | null>(null)
   const [lastRun, setLastRun] = useState<FormState | null>(null)
   const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: 'idle' })
@@ -101,6 +133,8 @@ export default function App() {
   const [walkForwardSent, setWalkForwardSent] = useState<string | null>(null) // the request's JSON
   const [showBenchmark, setShowBenchmark] = useState(true) // kept across runs
   const [segment, setSegment] = useState<SegmentKey>('full') // the KPI toggle; the cost sweep follows it
+  const [logScale, setLogScale] = useState(false) // the equity axis; kept across runs
+  const [historyKey, setHistoryKey] = useState(0) // bumped by each stored backtest, to reload the history
   const inFlight = useRef<AbortController | null>(null)
   const walkForwardInFlight = useRef<AbortController | null>(null)
 
@@ -111,6 +145,7 @@ export default function App() {
       return
     }
     setFormError(null)
+    window.history.replaceState(null, '', urlFor(form)) // settings only, never results
     inFlight.current?.abort() // a newer run replaces any request still in flight
     const controller = new AbortController()
     inFlight.current = controller
@@ -133,6 +168,7 @@ export default function App() {
     }
     if (signal.aborted) return
     setBacktest({ status: 'done', data: bt })
+    setHistoryKey((k) => k + 1) // the backtest is now stored
 
     // These two go out only now: the backtest has filled the price cache, whereas three
     // simultaneous cold-cache requests would each download the same tickers from Yahoo.
@@ -175,6 +211,13 @@ export default function App() {
 
   const onUseSeed = useCallback((seed: number) => setForm((f) => ({ ...f, mcSeed: String(seed) })), [])
 
+  // "Load settings" fills the sidebar from a stored run without running it (§13 view 12).
+  const onLoadSettings = useCallback((run: StoredRun) => {
+    setForm((f) => resolvedToForm(run.resolved, f))
+    setFormError(null)
+    setNotices([`Loaded the settings of run #${run.id} into the sidebar. Press Run to re-run it.`])
+  }, [])
+
   const view = useMemo(() => {
     if (backtest.status !== 'done') return null
     const bt = backtest.data
@@ -216,6 +259,7 @@ export default function App() {
     content = (
       <>
         <RunHeader bt={bt} />
+        <ExportBar backtest={bt} />
         <Warnings warnings={bt.warnings} />
         {guard(
           'Performance',
@@ -234,6 +278,9 @@ export default function App() {
             benchmark={view.benchmark}
             showBenchmark={showBenchmark}
             onShowBenchmark={setShowBenchmark}
+            logScale={logScale}
+            onLogScale={setLogScale}
+            ruined={bt.ruined}
           />)}
         {guard('Rolling statistics', <RollingPanel rows={view.rows} firstOos={view.firstOos} />)}
         {guard(
@@ -283,7 +330,13 @@ export default function App() {
         stale={stale}
       />
       <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[1600px] space-y-4 p-6">{content}</div>
+        <div className="mx-auto max-w-[1600px] space-y-4 p-6">
+          <Notices notices={notices} onDismiss={() => setNotices([])} />
+          {content}
+          <ErrorBoundary title="Run history">
+            <RunHistoryPanel reloadKey={historyKey} onLoadSettings={onLoadSettings} />
+          </ErrorBoundary>
+        </div>
       </main>
     </div>
   )

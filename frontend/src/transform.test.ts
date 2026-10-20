@@ -7,6 +7,7 @@ import {
   configLabel,
   costSweepView,
   divergingColor,
+  equityLogAxis,
   fanRows,
   fmtDelta,
   firstOosIndex,
@@ -15,6 +16,7 @@ import {
   heatmapLayout,
   histogramRows,
   legRows,
+  logAxis,
   lookbackLabel,
   niceTicks,
   NULL_CELL,
@@ -644,5 +646,72 @@ describe('the fold table', () => {
     expect(selectionChanges(folds)).toEqual([false, false, true, true, false, true, true])
     expect(selectionChanges([fold({ L: 20, z_entry: 1.5 }), fold(null)])).toEqual([false, true]) // the second fold
     expect(selectionChanges([])).toEqual([])
+  })
+})
+
+describe('logAxis: the log-scale equity axis (§13 view 2)', () => {
+  it('puts ticks at 1, 2 and 5 × 10^k, with the domain widened to the nearest such values', () => {
+    expect(logAxis(80_000, 260_000)).toEqual({ domain: [50_000, 500_000], ticks: [50_000, 100_000, 200_000, 500_000] })
+    expect(logAxis(100_000, 180_000)).toEqual({ domain: [100_000, 200_000], ticks: [100_000, 200_000] })
+    expect(logAxis(0.3, 0.45)).toEqual({ domain: [0.2, 0.5], ticks: [0.2, 0.5] })
+  })
+
+  it('has no float noise in its ticks', () => {
+    const axis = logAxis(0.0011, 0.07)
+    expect(axis?.ticks).toEqual([0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1])
+    expect(logAxis(3e-6, 8e-6)?.ticks).toEqual([2e-6, 5e-6, 1e-5]) // 5 * 10 ** -6 is 4.9999999999999996e-6
+  })
+
+  it('every tick is a 1, 2 or 5 inside the domain, and there are at least two', () => {
+    for (const [lo, hi] of [[1, 1], [3, 3], [99_999, 100_001], [12_345, 9_876_543], [5e4, 5e4], [7, 1e9]]) {
+      const axis = logAxis(lo, hi)
+      expect(axis).not.toBeNull()
+      const { domain, ticks } = axis!
+      expect(domain[0]).toBeLessThanOrEqual(lo)
+      expect(domain[1]).toBeGreaterThanOrEqual(hi)
+      expect(ticks.length).toBeGreaterThanOrEqual(2)
+      for (const t of ticks) {
+        expect(t).toBeGreaterThanOrEqual(domain[0])
+        expect(t).toBeLessThanOrEqual(domain[1])
+        expect(['1', '2', '5']).toContain(t.toExponential().charAt(0))
+        expect(t.toExponential()).toMatch(/^[125]e/)
+      }
+    }
+  })
+
+  it('keeps a flat series on two ticks', () => {
+    expect(logAxis(100_000, 100_000)).toEqual({ domain: [100_000, 200_000], ticks: [100_000, 200_000] })
+  })
+
+  it('keeps only the powers of ten over many decades', () => {
+    expect(logAxis(5, 2e6)).toEqual({ domain: [5, 2e6], ticks: [10, 100, 1000, 10_000, 100_000, 1_000_000] })
+    expect(logAxis(1000, 5e5)?.ticks).toHaveLength(9) // 1, 2, 5 over nine values still fits
+    expect(logAxis(1000, 1e6)?.ticks).toEqual([1000, 10_000, 100_000, 1_000_000]) // ten would not
+  })
+
+  it('is null when the range is not positive: a ruined run reaches 0', () => {
+    expect(logAxis(0, 100_000)).toBeNull()
+    expect(logAxis(-5, 10)).toBeNull()
+    expect(logAxis(10, 5)).toBeNull()
+    expect(logAxis(1, Infinity)).toBeNull()
+    expect(logAxis(Number.NaN, 5)).toBeNull()
+  })
+})
+
+describe('equityLogAxis', () => {
+  it('spans the equity, and the benchmark only while it is shown', () => {
+    const { rows } = seriesRows(
+      makeSeries({ equity: [null, null, 100000, 150000, 120000, 130000], benchmark_equity: [null, null, 100000, 99000, 98000, 260000] }),
+      [],
+    )
+    expect(equityLogAxis(rows, false)?.domain).toEqual([100_000, 200_000])
+    expect(equityLogAxis(rows, true)?.domain).toEqual([50_000, 500_000])
+  })
+
+  it('is null for a ruined run and for one with no equity yet', () => {
+    const ruined = seriesRows(makeSeries({ equity: [null, null, 100000, 50000, 10000, 0] }), []).rows
+    expect(equityLogAxis(ruined, false)).toBeNull()
+    const empty = seriesRows(makeSeries({ equity: [null, null, null, null, null, null] }), []).rows
+    expect(equityLogAxis(empty, false)).toBeNull()
   })
 })

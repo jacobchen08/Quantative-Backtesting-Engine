@@ -192,6 +192,25 @@ export type MonteCarloResponse = {
   elapsed_ms_total: number;
 };
 
+// ---------------------------------------------------------------- run history (§11.4, Phase 8)
+
+export type RunSummary = { id: number; created_at: string;        // ISO 8601, UTC
+                           engine_version: string; strategy: "mean_reversion" | "pairs" | "trend" | "trend_portfolio";
+                           tickers: string[]; start: string; end: string;
+                           sharpe_full: number | null; sharpe_oos: number | null;
+                           total_return_full: number; max_drawdown_full: number };
+export type RunDetail = { id: number; created_at: string; engine_version: string;
+                          resolved: ResolvedBacktestRequest & { split_date: string; first_evaluated_date: string; rf_source: string };
+                          metrics: BySegment<Metrics>; benchmark_metrics: BySegment<Metrics> };
+// A run stored by an earlier engine can lack fields added later; the API returns them as null (§11.4).
+// StoredRun is RunDetail as the dashboard must read it: any field may be null.
+type Nullable<T> = { [K in keyof T]: T[K] | null }
+export type StoredRun = Omit<RunDetail, 'resolved' | 'metrics' | 'benchmark_metrics'> & {
+  resolved: Nullable<RunDetail['resolved']>
+  metrics: Nullable<BySegment<Nullable<Metrics> | null>>
+  benchmark_metrics: Nullable<BySegment<Nullable<Metrics> | null>>
+}
+
 // ---------------------------------------------------------------- aliases of the types above
 
 export type Series = BacktestResponse['series']

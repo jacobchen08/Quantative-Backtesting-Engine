@@ -11,7 +11,7 @@ import datetime as dt
 import re
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
 from app.services import calendar
 from app.services.pipeline import StrategyParams
@@ -646,3 +646,56 @@ class MonteCarloResponse(BaseModel):
     closed_form_gbm: RiskOut
     hist_edges: list[float]  # 51, shared by the three models
     elapsed_ms_total: float
+
+
+# ---------------------------------------------------------------- run history (§11.4)
+
+
+def _nullable_copy(model: type[BaseModel], name: str) -> type[BaseModel]:
+    """The same fields as `model`, each nullable and defaulting to null.
+
+    A run stored by an earlier engine version can lack fields added later (ann_borrow_drag,
+    pairs_model, ...). Those read back as null; stored rows are never rewritten (§11.4).
+    """
+    fields: dict[str, Any] = {
+        key: (info.annotation | None, Field(default=None, alias=info.alias))
+        for key, info in model.model_fields.items()
+    }
+    return create_model(name, **fields)
+
+
+StoredMetrics = _nullable_copy(MetricsOut, "StoredMetrics")
+StoredResolvedRun = _nullable_copy(ResolvedBacktestRun, "StoredResolvedRun")
+
+
+class StoredSegmentMetrics(BaseModel):
+    is_: StoredMetrics | None = Field(default=None, alias="is")
+    oos: StoredMetrics | None = None
+    full: StoredMetrics | None = None
+
+
+class RunSummary(BaseModel):
+    """One row of GET /api/runs, read from the stored JSON."""
+
+    id: int
+    created_at: str  # ISO 8601, UTC
+    engine_version: str
+    strategy: Strategy
+    tickers: list[str]
+    start: str
+    end: str
+    sharpe_full: float | None
+    sharpe_oos: float | None  # null when the run has no OOS segment (ruin in IS)
+    total_return_full: float
+    max_drawdown_full: float
+
+
+class RunDetail(BaseModel):
+    """GET /api/runs/{id}: the stored resolved request and metrics. Equity curves aren't stored."""
+
+    id: int
+    created_at: str  # ISO 8601, UTC
+    engine_version: str
+    resolved: StoredResolvedRun
+    metrics: StoredSegmentMetrics
+    benchmark_metrics: StoredSegmentMetrics

@@ -1,11 +1,14 @@
-// Typed fetch wrappers for the four POST endpoints (§11.1). Every error the API returns is
+// Typed fetch wrappers for the API's endpoints (§11.1): four POSTs and, from Phase 8, the GETs of
+// the health check and the run history (§11.4). Every error the API returns is
 // {"detail": "..."}; ApiError carries that string so the views can show it verbatim (§13).
 import type {
   BacktestRequest,
   BacktestResponse,
   MonteCarloRequest,
   MonteCarloResponse,
+  RunSummary,
   SensitivityRequest,
+  StoredRun,
   SensitivityResponse,
   WalkForwardRequest,
   WalkForwardResponse,
@@ -39,15 +42,11 @@ export function errorDetail(status: number, statusText: string, body: unknown): 
   return `HTTP ${status_} with no error detail. Check that the API is running on port 8000 and read its log.`
 }
 
-async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+async function request<T>(path: string, init: RequestInit): Promise<T> {
+  const { signal } = init
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    })
+    response = await fetch(`${API_BASE}${path}`, init)
   } catch (error) {
     if (signal?.aborted) throw error // superseded by a newer run; the caller ignores it
     const reason = error instanceof Error ? error.message : String(error)
@@ -65,6 +64,14 @@ async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promi
   return parsed as T
 }
 
+function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
+}
+
+function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return request(path, { method: 'GET', signal })
+}
+
 export function postBacktest(request: BacktestRequest, signal?: AbortSignal): Promise<BacktestResponse> {
   return post('/api/backtest', request, signal)
 }
@@ -79,4 +86,18 @@ export function postMonteCarlo(request: MonteCarloRequest, signal?: AbortSignal)
 
 export function postWalkForward(request: WalkForwardRequest, signal?: AbortSignal): Promise<WalkForwardResponse> {
   return post('/api/walk-forward', request, signal)
+}
+
+export function getHealth(signal?: AbortSignal): Promise<{ status: string; engine_version: string }> {
+  return get('/api/health', signal)
+}
+
+/** Stored backtests, newest first (§11.4). */
+export function getRuns(limit = 50, signal?: AbortSignal): Promise<RunSummary[]> {
+  return get(`/api/runs?limit=${limit}`, signal)
+}
+
+/** One stored backtest. Fields an older engine didn't store are null, hence StoredRun. */
+export function getRun(id: number, signal?: AbortSignal): Promise<StoredRun> {
+  return get(`/api/runs/${id}`, signal)
 }

@@ -511,3 +511,44 @@ export function selectionChanges(folds: readonly Fold[]): boolean[] {
     a === null || b === null ? a === b : a.L === b.L && a.z_entry === b.z_entry
   return folds.map((fold, i) => i > 0 && !same(fold.selected, folds[i - 1].selected))
 }
+
+// ---------------------------------------------------------------- log-scale equity axis (§13 view 2)
+
+export type LogAxis = { domain: [number, number]; ticks: number[] }
+
+const LOG_MANTISSAS = [1, 2, 5] as const
+const MAX_LOG_TICKS = 9
+
+/**
+ * A log axis for values in [lo, hi] (both > 0). The domain is widened to the nearest 1, 2 or 5 × 10^k
+ * at or beyond each end, and the ticks are every such value inside it, so there are always at least
+ * two. Over many decades, where that would crowd the axis, only the powers of ten are kept.
+ * Returns null when lo or hi is not positive and finite: a log axis can't show 0 (a ruined run).
+ */
+export function logAxis(lo: number, hi: number): LogAxis | null {
+  if (!(lo > 0) || !(hi >= lo) || !Number.isFinite(hi)) return null
+  const values: number[] = []
+  for (let k = Math.floor(Math.log10(lo)) - 1; k <= Math.ceil(Math.log10(hi)) + 1; k += 1) {
+    for (const m of LOG_MANTISSAS) values.push(Number((m * 10 ** k).toPrecision(12)))
+  }
+  const lower = values.findLast((v) => v <= lo) as number
+  let upper = values.find((v) => v >= hi) as number
+  if (upper === lower) upper = values[values.indexOf(lower) + 1] // a flat series still gets two ticks
+  let ticks = values.filter((v) => v >= lower && v <= upper)
+  if (ticks.length > MAX_LOG_TICKS) ticks = ticks.filter((v) => v.toExponential().startsWith('1e'))
+  return { domain: [lower, upper], ticks }
+}
+
+/** The log axis for the equity chart: the strategy's equity, and the benchmark's while it is shown. */
+export function equityLogAxis(rows: readonly SeriesRow[], withBenchmark: boolean): LogAxis | null {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const r of rows) {
+    for (const v of withBenchmark ? [r.equity, r.benchmark] : [r.equity]) {
+      if (v === null) continue
+      lo = Math.min(lo, v)
+      hi = Math.max(hi, v)
+    }
+  }
+  return lo === Infinity ? null : logAxis(lo, hi)
+}

@@ -109,6 +109,9 @@ export function Sidebar(props: {
 
   return (
     <form
+      // min/max/step only drive the browser's spinners: without noValidate the browser would block Run
+      // for values the API accepts (cost 2.5 bps against step 1) and hide the API's 422 for the rest.
+      noValidate
       className="flex h-full w-80 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950"
       onSubmit={(e) => {
         e.preventDefault()

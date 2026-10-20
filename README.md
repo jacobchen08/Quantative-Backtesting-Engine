@@ -15,9 +15,11 @@ Several tools test how much a result can be trusted:
 - a walk-forward analysis, which re-chooses the grid's best configuration on each training window and trades it on the next test window, giving a track record that is out-of-sample throughout;
 - Monte Carlo projections with GBM, a circular block bootstrap and a stationary bootstrap, with an optional data-driven block length, checked against closed-form VaR and CVaR.
 
+The dashboard keeps a history of every backtest, with side-by-side comparison and "Load settings". Its settings live in the URL, so a link reproduces a run, and its trades, daily series and calendar returns export as CSV. Browser tests drive it in Chromium against an offline API.
+
 - **Specification:** [CLAUDE.md](CLAUDE.md), the source of truth for every formula and rule.
 - **Methodology:** [docs/METHODOLOGY.md](docs/METHODOLOGY.md) justifies each formula, lists the limitations, and records every approved deviation from the specification.
-- **Status:** Phases 0–7 are done: the engine, the API, the dashboard, the documentation and the benchmarks, then costs and robustness metrics, walk-forward analysis, and the Kalman pairs model, the trend portfolio and the stationary bootstrap. Phases 8 and 9 are specified in CLAUDE.md §16 but not built yet.
+- **Status:** Phases 0–8 are done: the engine, the API, the dashboard, the documentation and the benchmarks, then costs and robustness metrics, walk-forward analysis, the Kalman pairs model, the trend portfolio and the stationary bootstrap, and run history, URL state, CSV export, the log scale, offline mode and browser tests. Phase 9, a static demo, is specified in CLAUDE.md §16 but not built yet.
 
 ![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
 
@@ -50,7 +52,9 @@ cd frontend
 npm run dev
 ```
 
-Prices are downloaded from Yahoo Finance on first use and cached in `backend\quant.db`.
+Prices are downloaded from Yahoo Finance on first use and cached in `backend\quant.db`. With `QUANT_OFFLINE=1` set (in `.env` or the shell) the API never downloads: a ticker or date range that isn't cached returns 503.
+
+The sidebar's settings are written to the URL when you press Run, so the link reproduces the run; opening a link fills the sidebar and sends nothing until you press Run. **Run history**, at the bottom of the page, lists every stored backtest. "Load settings" puts a run's settings back in the sidebar, and ticking up to four runs compares their metrics.
 
 ## Tests and linters
 
@@ -67,6 +71,16 @@ npm run build
 ```
 
 The backend tests use synthetic data and a fake network, so they never reach Yahoo. They run in parallel, one worker per core (pytest-xdist); add `-n 0` to run them in one process.
+
+### Browser tests
+
+```powershell
+cd frontend
+npx playwright install chromium   # once
+npx playwright test
+```
+
+Playwright starts its own two servers and stops them afterwards: the API on port 8001, offline, on a temporary database that `backend\scripts\seed_e2e.py` fills with the synthetic market (tickers SYNY, SYNX, SYNT and SPY, 2012–2019), and a fresh production build on port 4173. Nothing reaches the network, and dev servers on 8000 and 5173 are left alone. The 10 tests took 43.4 s here (`npx playwright test` on 2026-10-19, including the build). CI runs them on Ubuntu.
 
 ## Benchmarks
 
@@ -170,7 +184,7 @@ Peak traced memory at the API caps (50,000 paths x 253 days, three models): 216 
 
 ## Screenshots
 
-All taken from the dashboard running against the local API, on Yahoo data. The two error views are from 2026-10-16, the rest from 2026-10-19. The KO/PEP section views show the in-sample segment, where the cost sweep has a break-even line. The walk-forward view has the buy & hold line hidden with its toggle, so the axis fits the two pairs strategies.
+All taken on 2026-10-19 from the dashboard running against the local API, on Yahoo data, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173 running, that script regenerates every file in `docs\screenshots`; it downloads any data the cache lacks. The KO/PEP section views show the in-sample segment, where the cost sweep has a break-even line. The walk-forward view has the buy & hold line hidden with its toggle, so the axis fits the two pairs strategies.
 
 | | |
 |---|---|
@@ -181,6 +195,7 @@ All taken from the dashboard running against the local API, on Yahoo data. The t
 | ![Walk-forward](docs/screenshots/walk-forward.png) Walk-forward: the test windows stitched together against L 60 / z 2.0 held fixed, the metrics and the fold table | ![Monte Carlo](docs/screenshots/monte-carlo.png) Monte Carlo fan chart, histogram and risk table |
 | ![Kalman signal panel](docs/screenshots/signal-panel-kalman.png) KO/PEP with the Kalman model: the innovation z-score and the filtered hedge ratio | ![Trend-portfolio signal panel](docs/screenshots/signal-panel-trend-portfolio.png) Trend portfolio of 10 ETFs: each leg's score and trades, the executed weights, gross exposure and each leg's vol forecast |
 | ![Trend-portfolio KPI grid](docs/screenshots/kpi-grid-trend-portfolio.png) The trend portfolio's KPI grid against its equal-weight basket, with the per-asset target and the legs' days at their cap | ![Stationary bootstrap](docs/screenshots/monte-carlo-stationary.png) Monte Carlo of the trend portfolio with automatic block lengths, showing the stationary bootstrap |
+| ![Log-scale equity](docs/screenshots/equity-drawdown-log.png) SPY trend with a 10% volatility target, 2006–2025, on the log scale | ![Run history](docs/screenshots/run-history.png) Run history, comparing four stored runs on the full window |
 | ![Unknown ticker](docs/screenshots/error-unknown-ticker.png) An unknown ticker (404) | ![Grid needs more history](docs/screenshots/error-sensitivity-grid.png) A trend history too short for the grid (422) |
 
 Full-page captures: [KO/PEP pairs](docs/screenshots/dashboard-pairs-full.png), [SPY trend, 2006–2025, with a 10% volatility target](docs/screenshots/dashboard-trend-voltarget-full.png), and [the diversified trend portfolio of 10 ETFs, 2015–2025](docs/screenshots/dashboard-trend-portfolio-full.png).

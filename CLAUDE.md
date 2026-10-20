@@ -83,7 +83,7 @@ quant-engine/
     app/
       __init__.py            # __version__ = engine version
       main.py                # FastAPI app, lifespan (create tables), CORS, routes
-      config.py              # env: DATABASE_URL, CORS_ORIGINS, LOG_LEVEL
+      config.py              # env: DATABASE_URL, CORS_ORIGINS, LOG_LEVEL; QUANT_OFFLINE (Phase 8)
       database.py            # engine + session dependency
       models.py              # ORM tables (§4.1)
       schemas.py             # Pydantic v2 request/response models (§11)
@@ -104,6 +104,7 @@ quant-engine/
     tests/                   # §12
     tests/synthetic.py       # the synthetic-market generator, shared by conftest.py and seed_e2e.py
   frontend/                  # Vite React-TS app (§13)
+    playwright.config.ts     # Phase 8: the browser tests' two servers (§12, "Browser tests")
     e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests")
     scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
     public/demo/             # Phase 9: recorded responses for the static demo
@@ -124,7 +125,7 @@ quant-engine/
 - **Pages (Phase 9):** `pages.yml` builds the frontend with `VITE_DEMO=1` and deploys `dist/` to GitHub Pages on every push to `main`.
 - **Config files:**
   - `.env.example` lists every environment variable with its default.
-  - `.gitignore` covers `.venv/`, `node_modules/`, `*.db`, `__pycache__/`, `.env` and `dist/`.
+  - `.gitignore` covers `.venv/`, `node_modules/`, `*.db`, `__pycache__/`, `.env` and `dist/`; from Phase 8 also `dist-e2e/` and Playwright's `test-results/` and `playwright-report/`.
 
 ## 4. Data Layer
 
@@ -181,7 +182,7 @@ quant-engine/
   - a download error for any other exception, whose log text is the exception's repr, e.g. `ConnectionError('…')`.
 
   An unknown or delisted ticker logs a plain message such as `possibly delisted; no timezone found`, not an exception, so it stays an empty frame (404).
-- **Offline mode (Phase 8).** With the environment variable `QUANT_OFFLINE=1` (default unset; listed in `.env.example`), `fetch_from_yahoo` raises a 503 data-source error, `"Offline mode: {ticker} is not in the local cache"`, without importing or calling yfinance. The browser tests (§12) run the API this way, so a cache miss fails loudly instead of reaching the network.
+- **Offline mode (Phase 8).** With the environment variable `QUANT_OFFLINE=1` (default unset; listed in `.env.example`; any other value is online), a cache miss raises a 503 data-source error, `"Offline mode: {ticker} is not in the local cache"`, and `fetch_from_yahoo` is never called. The check sits in the seam's only caller, not in `fetch_from_yahoo` itself, because the tests' fake replaces that function and must be able to count that it wasn't called (METHODOLOGY, Phase 8 deviations). The variable is read on every call. The browser tests (§12) run the API this way, so a cache miss fails loudly instead of reaching the network.
 
 ### 4.4 Cleaning (tradable tickers)
 - Drop rows with a missing `close` or `adj_close`, de-duplicate dates (keep the last), and sort.
@@ -1054,7 +1055,7 @@ type MonteCarloResponse = {
                      resolved: ResolvedBacktestRequest & { split_date: string; first_evaluated_date: string; rf_source: string };
                      metrics: BySegment<Metrics>; benchmark_metrics: BySegment<Metrics> };
   ```
-- **Old rows.** Runs stored by an earlier engine version can lack fields added later, such as `ann_borrow_drag`. Missing fields are returned as `null`, and the UI flags runs whose `engine_version` differs from the current one. Old rows are never rewritten.
+- **Old rows.** Runs stored by an earlier engine version can lack fields added later, such as `ann_borrow_drag`. Missing fields are returned as `null`, and the UI flags runs whose `engine_version` differs from the current one. Old rows are never rewritten. The response models for stored runs are therefore nullable copies of `MetricsOut` and `ResolvedBacktestRun`, and `types.ts` reads a run as `StoredRun`, `RunDetail` with every stored field nullable. `created_at` carries a `+00:00` offset.
 - Equity curves are not stored, so comparisons cover metrics only. Re-running a stored request reproduces its curves on the same cached data (§14).
 
 ## 12. Tests (pytest; no network; full suite under 60 s)
@@ -1331,8 +1332,10 @@ Keep the Phase 3 mutation check: before each phase ends, inject deliberate bugs 
 ### Browser tests (Playwright; Phase 8)
 These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never against the network.
 - **Setup.** `playwright.config.ts` uses `webServer` to start two servers:
-  - uvicorn with `QUANT_OFFLINE=1` and a `DATABASE_URL` pointing at a temporary SQLite file that `backend/scripts/seed_e2e.py` has filled with the synthetic market and coverage rows. Synthetic tickers such as `SYNY`, `SYNX` and `SYNT` cover 2012-01-03 to 2019-12-31, and every request ends by then, so every price read is a cache hit;
-  - `vite preview` on a fresh build.
+  - uvicorn on port 8001 with `QUANT_OFFLINE=1` and a `DATABASE_URL` pointing at a temporary SQLite file that `backend/scripts/seed_e2e.py` has filled with the synthetic market and coverage rows. The tickers `SYNY`, `SYNX` (a cointegrated pair) and `SYNT` (a trending asset), with SPY and ^IRX, cover 2012-01-03 to 2019-12-31, and every request ends by then, so every price read is a cache hit;
+  - `vite preview` on port 4173, on a fresh build in `dist-e2e/` whose `VITE_API_URL` points at port 8001 (the API's `CORS_ORIGINS` allows 4173).
+
+  Neither server is reused, so the tests never touch a developer's servers on 8000 and 5173. They share the one database and run one at a time.
 - **Tests:**
   - a pairs run renders every panel, with no console errors;
   - a trend run shows the single-row heatmap;
@@ -1341,9 +1344,11 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
   - a blank field blocks the Run with zero requests;
   - after a run, the history panel lists it and "Load settings" restores the sidebar;
   - the trades CSV downloads with the right header row;
-  - the URL round-trips the settings without sending a request on load.
+  - the URL round-trips the settings without sending a request on load;
+  - an invalid URL parameter is ignored with a notice naming it (Phase 8 addition);
+  - Run is not blocked by the browser's own form validation: an off-step value reaches the API, and an out-of-range one gets its 422 (Phase 8 addition).
 - These tests are outside pytest's 60 s budget (§14).
-- `npm run screenshots` (`frontend/scripts/screenshots.ts`) uses Playwright against a live local API with real data, to regenerate `docs/screenshots/`. It needs the network, so it never runs in CI.
+- `npm run screenshots` (`frontend/scripts/screenshots.ts`, run by Node's built-in TypeScript support) uses Playwright against the dev servers on 8000 and 5173 with real data, to regenerate every file in `docs/screenshots/`. It sets each scenario up through the URL. It needs the network, so it never runs in CI.
 
 ## 13. Frontend (`/frontend`)
 
@@ -1378,7 +1383,7 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
   - For pairs, a model switch (rolling OLS or Kalman) and δ.
 - Requests are sent only from explicit buttons. **Run** sends the backtest, then sensitivity and Monte Carlo. From Phase 6, **Run walk-forward** in its panel sends that request, because the walk-forward reruns the whole grid. The run-history list (Phase 8) loads when its panel is opened and reloads after each successful Run.
 - **URL state (Phase 8).**
-  - When Run is pressed, the settings that differ from the defaults are written to the query string with `history.replaceState`.
+  - When Run is pressed, the settings that differ from the defaults are written to the query string with `history.replaceState`. The parameter names are `FormState`'s field names; L is compared with the chosen strategy's default.
   - On load, the query string fills the sidebar but sends nothing. Each invalid or unknown parameter is ignored with a notice naming it.
   - The URL holds settings only, never results.
 
@@ -1440,7 +1445,7 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
     - a note that the walk-forward track record is entirely out-of-sample, with each fold's parameters chosen before its test window.
 12. **Run history (Phase 8, §11.4):**
     - a table of stored runs with their key metrics;
-    - "Load settings", which fills the sidebar from a run's resolved request without running it;
+    - "Load settings", which fills the sidebar from a run's resolved request without running it, including its resolved split date. A field an older engine didn't store loads as the default it was introduced with;
     - selection of up to 4 runs for a side-by-side metrics comparison (IS | OOS | Full);
     - a flag on runs from an older engine version.
 13. **CSV export (Phase 8).** Buttons download:
@@ -1452,7 +1457,7 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
     - RFC 4180 quoting, with CRLF line endings;
     - numbers written at full precision (`String(x)`), not as formatted;
     - nulls written as empty fields;
-    - file names `{strategy}-{tickers}-{start}-{end}-{table}.csv`.
+    - file names `{strategy}-{tickers}-{start}-{end}-{table}.csv`, with the tickers joined by `_`.
 
 ### Behaviour and tests
 - Charts use `isAnimationActive={false}` and `dot={false}`; there are about 4,000 points per series.
