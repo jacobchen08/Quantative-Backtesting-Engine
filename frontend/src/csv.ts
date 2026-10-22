@@ -90,7 +90,7 @@ export function seriesCsv(series: Series): string {
   )
 }
 
-export const CALENDAR_COLUMNS = ['period', 'year', 'month', 'strategy', 'benchmark', 'partial'] as const
+const CALENDAR_COLUMNS = ['period', 'year', 'month', 'strategy', 'benchmark', 'partial'] as const
 
 /** Monthly rows (period "month"), then annual rows (period "year", month empty). */
 export function calendarCsv(calendar: CalendarReturns): string {

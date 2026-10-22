@@ -77,7 +77,7 @@ export function DemoBanner(props: { demo: DemoManifest }) {
       live data.{' '}
       <a
         className="text-violet-400 underline hover:text-violet-200"
-        href="https://github.com/jacobchen08/Quantative-Backtesting-Engine#readme"
+        href="https://github.com/jacobchen08/Quantitative-Backtesting-Engine#readme"
       >
         Source and setup
       </a>

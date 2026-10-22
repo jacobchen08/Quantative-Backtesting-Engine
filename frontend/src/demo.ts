@@ -1,4 +1,4 @@
-// The static demo (§13, "Static demo", Phase 9): a build with VITE_DEMO=1 replays responses that
+// The static demo (§13, "Static demo"): a build with VITE_DEMO=1 replays responses that
 // backend/scripts/record_demo.py recorded, so it runs on GitHub Pages with no backend. api.ts hands
 // each request to replay() instead of fetch(): the request is looked up in public/demo/manifest.json,
 // and the recorded response file it names is returned as the API's body.

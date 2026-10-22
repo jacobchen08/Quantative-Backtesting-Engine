@@ -111,14 +111,14 @@ export type Metrics = {
   pct_days_in_market: number; n_closed_trades: number | null; n_open_trades: number | null;
   win_rate: number | null; avg_holding_days: number | null;
   ann_turnover: number | null; ann_cost_drag: number | null;   // trade/cost fields are null for benchmarks
-  ann_borrow_drag: number | null;                               // Phase 5; null for benchmarks
+  ann_borrow_drag: number | null;                               // null for benchmarks
   avg_gross_exposure: number;                                   // 1 for benchmarks
 };
 export type Trade = {
   id: number; side: "long" | "short"; segment: "is" | "oos"; open: boolean;
   signal_date: string; entry_date: string; exit_signal_date: string | null; exit_date: string | null;
   holding_days: number; pnl: number; beta_at_entry: number | null;
-  ticker: string | null;                                        // Phase 7: the leg, for trend_portfolio only
+  ticker: string | null;                                        // the leg, for trend_portfolio only
 };
 type BySegment<T> = { is: T; oos: T | null; full: T };          // oos is null only if ruin happened in IS
 export type BacktestResponse = {
@@ -132,13 +132,13 @@ export type BacktestResponse = {
     position: number[];                       // executed position pos
     gross_exposure: number[];                 // executed sum of |w| at the end of each day (shows leverage over time)
     score: (number | null)[] | null;          // z (mean_reversion, pairs) or sampled trailing excess return m (trend);
-                                              // null for trend_portfolio (Phase 7), whose scores are in legs
+                                              // null for trend_portfolio, whose scores are in legs
     beta: (number | null)[] | null; beta_used: (number | null)[] | null;   // pairs only (filtered beta with pairs_model="kalman")
     vol_forecast: (number | null)[] | null;   // annualized sigma (§5.6); null when the overlay is off and for trend_portfolio
     is_oos: boolean[];
-    rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // Phase 5, §8.2
+    rolling_sharpe: (number | null)[]; rolling_beta: (number | null)[];   // §8.2
     legs: { ticker: string; score: (number | null)[]; position: number[];
-            weight: number[]; vol_forecast: (number | null)[] }[] | null; // Phase 7: trend_portfolio only; executed values
+            weight: number[]; vol_forecast: (number | null)[] }[] | null; // trend_portfolio only; executed values
   };
   sizing: { vol_target: number; max_leverage: number;
             pct_days_at_cap: number | null } | null;   // whole object null when the overlay is off; pct null if never invested
@@ -147,11 +147,11 @@ export type BacktestResponse = {
   benchmark_metrics: { is: Metrics; oos: Metrics | null; full: Metrics };  // same window as the strategy
   diagnostics: { coint_p_is: number | null; coint_p_oos: number | null; half_life_is: number | null;
                  static_beta_is: number | null; static_alpha_is: number | null } | null;    // pairs only (null for the other strategies)
-  cost_sensitivity: { cost_bps: number[];                       // Phase 5, §8.1; null if ruined
+  cost_sensitivity: { cost_bps: number[];                       // §8.1; null if ruined
                       sharpe: BySegment<(number | null)[]>;     // one value per cost_bps entry
                       break_even_bps: BySegment<number | null> } | null;
   calendar: { monthly: { year: number; month: number; strategy: number; benchmark: number; partial: boolean }[];
-              annual: { year: number; strategy: number; benchmark: number; partial: boolean }[] };   // Phase 5, §8.2
+              annual: { year: number; strategy: number; benchmark: number; partial: boolean }[] };   // §8.2
   ruined: boolean; ruin_date: string | null; warnings: string[];
 };
 export type SensitivityResponse = {
@@ -159,11 +159,11 @@ export type SensitivityResponse = {
   sharpe: (number | null)[][];                                  // rows = L; one column for trend and trend_portfolio
   n_configs_tested: number; window: { start: string; end: string };
   selected: { L: number; z_entry: number | null } | null;       // the request's own cell, if it is in the grid
-  deflated: { n_trials: number; sr0_star: number | null;        // Phase 5, §9.1; sr0_star annualized for display
+  deflated: { n_trials: number; sr0_star: number | null;        // §9.1; sr0_star annualized for display
               selected_dsr: number | null;
               best: { L: number; z_entry: number | null; sharpe: number; dsr: number | null } | null };
 };
-export type WalkForwardResponse = {                                    // Phase 6, §9.2
+export type WalkForwardResponse = {                                    // §9.2
   resolved: ResolvedBacktestRequest & { train_days: number; test_days: number; anchored: boolean;
                                         L_values: number[]; z_entry_values: number[] | null };
   folds: { train_start: string; train_end: string; test_start: string; test_end: string;   // inclusive dates
@@ -184,15 +184,15 @@ export type ModelResult = {
 };
 export type MonteCarloResponse = {
   resolved: ResolvedMonteCarloRequest & { seed: number; n_hist: number; mu_daily: number; sigma_daily: number;
-                                          block_len_used: { circular: number; stationary: number } };   // Phase 7
+                                          block_len_used: { circular: number; stationary: number } };
   gbm: ModelResult; bootstrap: ModelResult;
-  stationary: ModelResult;                                      // Phase 7, §10.7
+  stationary: ModelResult;                                      // §10.7
   closed_form_gbm: { var95: number; var99: number; cvar95: number; cvar99: number };
   hist_edges: number[];            // 51, shared by the three models
   elapsed_ms_total: number;
 };
 
-// ---------------------------------------------------------------- run history (§11.4, Phase 8)
+// ---------------------------------------------------------------- run history (§11.4)
 
 export type RunSummary = { id: number; created_at: string;        // ISO 8601, UTC
                            engine_version: string; strategy: "mean_reversion" | "pairs" | "trend" | "trend_portfolio";

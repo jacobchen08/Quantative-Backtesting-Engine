@@ -1,9 +1,9 @@
 // Dashboard shell: the sidebar holds the settings, the main panel the views (§13). A Run sends the
 // backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel. The
-// walk-forward goes out only from its own panel's button. The settings live in the URL (Phase 8):
+// walk-forward goes out only from its own panel's button. The settings live in the URL:
 // loading a URL fills the sidebar without sending anything, and each Run writes them back.
 //
-// The static demo (Phase 9) is this same dashboard with `demo` set: the sidebar offers only the
+// The static demo is this same dashboard with `demo` set: the sidebar offers only the
 // recorded scenarios, requests are replayed (demo.ts), a banner dates the recording, the run history
 // is hidden, and the chosen scenario is shown at once, since a replay costs nothing.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'

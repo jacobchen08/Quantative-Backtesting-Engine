@@ -15,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from app.services import calendar
 from app.services.monte_carlo import MAX_BLOCK_LEN, MAX_SEED
-from app.services.pipeline import MAX_GRID_VALUES, PORTFOLIO_LEGS, StrategyParams
+from app.services.pipeline import PORTFOLIO_LEGS, StrategyParams
+from app.services.sensitivity import MAX_GRID_VALUES
 
 TICKER = re.compile(r"^[A-Z0-9.^=-]{1,15}$")
 EARLIEST_START = dt.date(1990, 1, 1)

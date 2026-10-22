@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config'
 
 // The static demo's path on GitHub Pages (§13, "Static demo"): https://<user>.github.io/<repository>/.
 // pages.yml passes the repository's name; this default is the name it has now.
-const DEMO_BASE = '/Quantative-Backtesting-Engine/'
+const DEMO_BASE = '/Quantitative-Backtesting-Engine/'
 
 /**
  * Leaves the recorded demo responses out of every build but the demo's. Vite copies all of public/
@@ -30,7 +30,7 @@ function dropDemoData(): Plugin {
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '..', 'VITE_') // process.env wins over the .env file, as in the app
-  // `vite build --mode demo` (npm run build:demo) or VITE_DEMO=1: the static demo (Phase 9).
+  // `vite build --mode demo` (npm run build:demo) or VITE_DEMO=1: the static demo.
   const demo = mode === 'demo' || env.VITE_DEMO === '1'
   return {
     plugins: [react(), tailwindcss(), ...(demo ? [] : [dropDemoData()])],

@@ -96,7 +96,7 @@ try {
   const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT } })
 
   // KO/PEP, the README's set. The sections show the IS segment (the cost sweep has a break-even line
-  // there), and the walk-forward is shown without the benchmark line (approved in Phase 6).
+  // there), and the walk-forward is shown without the benchmark line.
   await open(page, PAIRS)
   console.log('pairs finished in', await run(page), 'ms')
   console.log('pairs walk-forward finished in', await walkForward(page), 'ms')
@@ -129,7 +129,7 @@ try {
   await tall(page)
   await section(page, 'signal-panel-kalman', 'Signal')
 
-  // SPY trend with a 10% volatility target, 2006-2025, and its equity on the log scale (Phase 8).
+  // SPY trend with a 10% volatility target, 2006-2025, and its equity on the log scale.
   await open(page, { strategy: 'trend', start: '2006-01-03', end: '2025-12-31', volOn: 'true', mcSeed: '42' })
   console.log('trend finished in', await run(page), 'ms')
   console.log('trend walk-forward finished in', await walkForward(page), 'ms')
@@ -160,7 +160,7 @@ try {
   await panel(page, 'Monte Carlo').getByRole('button', { name: 'Stationary' }).click()
   await section(page, 'monte-carlo-stationary', 'Monte Carlo')
 
-  // Run history (Phase 8): the four runs above, compared on the full window.
+  // Run history: the four runs above, compared on the full window.
   await open(page, {})
   const history = panel(page, 'Run history')
   await history.getByRole('button', { name: 'Show run history' }).click()

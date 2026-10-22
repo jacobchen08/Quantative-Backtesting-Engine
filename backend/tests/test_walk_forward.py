@@ -1,7 +1,7 @@
 """Walk-forward analysis (§12, test_walk_forward.py): folds, causal selection, stitching, fold
 ownership, the fixed-grid identity, flat folds, ruin and too little data.
 
-These call pipeline.run_walk_forward directly, apart from the last test, which goes through the
+These call walk_forward.run_walk_forward directly, apart from the last test, which goes through the
 API. Small grids keep them fast; the protocol is the same for any grid.
 """
 
@@ -18,11 +18,10 @@ from fastapi.testclient import TestClient
 
 from app.services import metrics
 from app.services.backtester import InsufficientDataError
-from app.services.pipeline import (
+from app.services.pipeline import StrategyParams, run_strategy
+from app.services.walk_forward import (
     FoldWindow,
-    StrategyParams,
     WalkForwardResult,
-    run_strategy,
     run_walk_forward,
     select_configuration,
     walk_forward_folds,

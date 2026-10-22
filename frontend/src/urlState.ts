@@ -1,4 +1,4 @@
-// URL state (§13, Phase 8). Run writes the sidebar settings that differ from the defaults to the
+// URL state (§13). Run writes the sidebar settings that differ from the defaults to the
 // query string; loading a URL fills the sidebar from it and sends nothing. The URL holds settings
 // only, never results. Parameters are FormState's own keys, so a URL reads like the form.
 //

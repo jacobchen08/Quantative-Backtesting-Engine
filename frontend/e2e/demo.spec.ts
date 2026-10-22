@@ -1,10 +1,10 @@
-// Browser tests of the static demo (§13, "Static demo"; Phase 9): the demo build, served as static
+// Browser tests of the static demo (§13, "Static demo"): the demo build, served as static
 // files under its GitHub Pages path by `vite preview` on :4174 (playwright.config.ts), replaying the
 // responses recorded in public/demo/. No API is involved: the tests check that none is called.
 import { expect, test, type Page } from '@playwright/test'
 import manifest from '../public/demo/manifest.json' with { type: 'json' }
 
-const DEMO = 'http://localhost:4174/Quantative-Backtesting-Engine/' // vite.config.ts, DEMO_BASE
+const DEMO = 'http://localhost:4174/Quantitative-Backtesting-Engine/' // vite.config.ts, DEMO_BASE
 const NOT_RECORDED = "This configuration isn't in the demo. Run the project locally for live data."
 
 const HEADINGS: Record<string, string> = {

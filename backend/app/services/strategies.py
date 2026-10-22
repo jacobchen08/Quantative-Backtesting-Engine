@@ -171,11 +171,12 @@ def pair_unit_weights(signal: pd.Series, beta_used: pd.Series, tickers: tuple[st
     1 / (1 + |beta|). Columns are the tickers, so they match the returns frame (§6.1).
     Weights are exactly 0.0 when flat, including during warm-up.
     """
-    open_ = signal != 0
-    if beta_used[open_].isna().any():
+    s, beta = signal.to_numpy(dtype=float), beta_used.to_numpy(dtype=float)
+    open_ = s != 0
+    if np.isnan(beta[open_]).any():
         raise ValueError("beta_used is NaN on a day with an open pairs position")
-    w_y = np.where(open_, signal / (1 + beta_used.abs()), 0.0)
-    w_x = np.where(open_, -signal * beta_used / (1 + beta_used.abs()), 0.0)
+    w_y = np.where(open_, s / (1 + np.abs(beta)), 0.0)
+    w_x = np.where(open_, -s * beta / (1 + np.abs(beta)), 0.0)
     return pd.DataFrame({tickers[0]: w_y, tickers[1]: w_x}, index=signal.index)
 
 

@@ -136,7 +136,7 @@ def test_backtest(client: TestClient, request_fields: dict) -> None:
     assert (out["sizing"] is not None) == ("vol_target" in request_fields)
     assert set(out["metrics"]) == set(out["benchmark_metrics"]) == {"is", "oos", "full"}
     assert out["trades"] and all(t["segment"] in ("is", "oos") for t in out["trades"])
-    # Phase 5: the borrow fee and long-only switch, the cost sweep, calendar and rolling statistics.
+    # The borrow fee and long-only switch, the cost sweep, calendar and rolling statistics.
     borrow, allow_short = request_fields.get("borrow_bps", 0.0), request_fields.get("allow_short", True)
     assert (resolved["borrow_bps"], resolved["allow_short"]) == (borrow, allow_short)
     assert (out["metrics"]["full"]["ann_borrow_drag"] > 0) == (borrow > 0 and allow_short)
@@ -503,7 +503,7 @@ def test_a_one_day_oos_segment_after_ruin_still_validates(
     assert out["calendar"]["monthly"][-1]["partial"] and out["calendar"]["annual"][-1]["partial"]
 
 
-# ---------------------------------------------------------------- Phase 5: a zero borrow fee is the default
+# ---------------------------------------------------------------- a zero borrow fee is the default
 
 
 def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
@@ -514,7 +514,7 @@ def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
     assert {**implicit, "run_id": None} == {**explicit, "run_id": None}
 
 
-# ---------------------------------------------------------------- Phase 7
+# ---------------------------------------------------------------- Kalman pairs and the trend portfolio
 
 PORTFOLIO = ["T08", "T15", "T20", "T30"]
 

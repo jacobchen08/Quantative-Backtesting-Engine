@@ -285,7 +285,7 @@ describe('labels', () => {
     expect(pairs[2]).toBe('Shorting: required (a pair always holds a short leg)')
   })
 
-  it('states the pairs model, and the trend portfolio’s per-asset sizing (Phase 7)', () => {
+  it('states the pairs model, and the trend portfolio’s per-asset sizing', () => {
     const base = {
       strategy: 'pairs',
       tickers: ['KO', 'PEP'],

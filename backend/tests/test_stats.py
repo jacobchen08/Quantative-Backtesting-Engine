@@ -12,7 +12,8 @@ from statsmodels.tools.sm_exceptions import CollinearityWarning
 from statsmodels.tsa.stattools import coint
 
 from app.services import stats
-from app.services.pipeline import StrategyParams, build_report, run_strategy
+from app.services.pipeline import StrategyParams, run_strategy
+from app.services.report import build_report
 
 
 def ar1(phi: float, eps: np.ndarray) -> np.ndarray:

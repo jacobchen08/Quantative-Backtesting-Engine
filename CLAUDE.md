@@ -1,36 +1,32 @@
-# Quant Engine: Engineering Specification
+# Quantitative Backtesting Engine: specification
 
-A backtesting and Monte Carlo risk engine. This file is the source of truth for the AI coding agent and for human reviewers. **Formulas, code snippets, thresholds and tolerances are normative.**
+This is the specification the backtesting and Monte Carlo engine is built against. It's written to be exact enough for an AI coding agent to implement without guessing (Claude Code reads this file as its instructions) and for a person to review line by line. The formulas, code snippets, thresholds and tolerances are normative: the code has to match them, and any departure is recorded in `docs/METHODOLOGY.md`.
 
-Spec reviewed on 2026-10-15 against numpy 2.5, pandas 3.0, scipy 1.18, statsmodels 0.15, yfinance 1.7, FastAPI 0.143 / Starlette 1.8 / Pydantic 2.14, SQLAlchemy 2.1, SQLite 3.50, React 19, Vite 8, Tailwind CSS 4.3 and Recharts 3.10. Two labels mark where facts came from:
-- **(verified)** = library or data behaviour observed directly.
-- **(measured)** = a number from a reference prototype run during that review. These numbers come from the prototype, not the final code, so never quote them as results.
+I reviewed it on 2026-10-15 against numpy 2.5, pandas 3.0, scipy 1.18, statsmodels 0.15, yfinance 1.7, FastAPI 0.143 / Starlette 1.8 / Pydantic 2.14, SQLAlchemy 2.1, SQLite 3.50, React 19, Vite 8, Tailwind CSS 4.3 and Recharts 3.10. Two labels say where a fact came from. **(verified)** marks library or data behaviour observed directly. **(measured)** marks a number from a reference prototype run during that review; it comes from the prototype, not the final code, so it should never be quoted as a result.
 
-The material for Phases 5–9 (added 2026-10-16: §5.7–5.9, §8.1–8.2, §9.1–9.2, §10.7–10.8, §11.4 and the matching parts of §6, §7, §11–16) has **not** been checked against the libraries or a prototype yet, so it carries neither label. Each of those phases starts by checking the library behaviour its sections rely on, and reports anything that doesn't hold before writing code (§0, rule 2).
+The material for Phases 5–9 (§5.7–5.9, §8.1–8.2, §9.1–9.2, §10.7–10.8, §11.4 and the matching parts of §6, §7, §11–16) was added on 2026-10-16 without that review, so it carries neither label. Each of those phases began by checking the library behaviour its sections rely on, and reporting anything that didn't hold before any code was written (§0, rule 2).
 
-## 0. Rules for the Agent (read first)
-1. **This file is the source of truth.** Implement formulas, snippets, thresholds and tolerances exactly as written. Do not substitute a "standard" version from memory or silently "improve" anything. If you believe something here is wrong, explain why and wait for approval.
+## 0. Working rules (read these first)
+These apply to whoever implements the spec, whether that's the coding agent or a person.
+
+1. **This file is the source of truth.** Implement formulas, snippets, thresholds and tolerances exactly as written, and don't swap in a "standard" version from memory or quietly "improve" anything. If you think something here is wrong, explain why and wait for approval.
 2. **Ask instead of guessing.** If anything is ambiguous, contradictory, or doesn't work with the installed library versions, stop and ask.
-3. **Never weaken a test to make it pass.** No `skip`, `xfail`, loosened tolerances or deleted assertions. Find the root cause. If you believe a test contradicts this spec, say so and ask.
-4. **Never invent numbers.** Runtimes, Sharpe ratios and returns in code, comments, docs or the README must come from a run you actually performed, quoted with the command that produced them.
-5. **Work phase by phase (§16).** At the end of each phase, run the full test suite and linters, show the output, list any deviations from this spec, then stop and wait for review. Commit only after the user approves.
-6. **Windows first.** The developer uses Windows 11 and PowerShell, and every documented command must work there. No Makefiles or bash-only scripts; automate with Python scripts.
+3. **Never weaken a test to make it pass.** That means no `skip`, no `xfail`, no loosened tolerances and no deleted assertions; find the root cause instead. If you think a test contradicts this spec, say so and ask.
+4. **Never invent numbers.** Every runtime, Sharpe ratio or return in code, comments, docs or the README has to come from a run you actually performed, quoted with the command that produced it.
+5. **Work phase by phase (§16).** At the end of each phase, run the full test suite and the linters, show the output, list any deviations from this spec, then stop and wait for review. Commit only after the user approves.
+6. **Windows first.** Development happens on Windows 11 in PowerShell, and every documented command has to work there. No Makefiles or bash-only scripts; automate with Python scripts.
 7. **Record approved deviations** in `docs/METHODOLOGY.md` under "Deviations", with the reason.
-8. **Keep the core pure.** `pipeline.py`, `strategies.py`, `sizing.py`, `backtester.py`, `metrics.py`, `stats.py` and `monte_carlo.py` take arrays or Series and return arrays, Series or dataclasses. They do no I/O, touch no database or network, and use no globals. All I/O lives in `data_loader.py` and the API layer.
-9. **Document semantics in docstrings.** Every public function states its units, what "the value at date t" means, and its timing.
+8. **Keep the core pure.** `pipeline.py`, `report.py`, `sensitivity.py`, `walk_forward.py`, `strategies.py`, `sizing.py`, `backtester.py`, `metrics.py`, `stats.py` and `monte_carlo.py` take arrays or Series and return arrays, Series or dataclasses. They do no I/O, touch no database or network, and use no globals. All I/O lives in `data_loader.py` and the API layer.
+9. **Document semantics in docstrings.** Every public function says what units it uses, what "the value at date t" means, and its timing.
 
 ## 1. Scope
-A local, single-user research tool that:
-- backtests four daily strategies on US-listed stocks and ETFs: **single-asset mean reversion**, **pairs trading** (statistical arbitrage, with a rolling-OLS or Kalman-filter hedge ratio), **time-series momentum** (trend following) on one asset, and a **multi-asset trend portfolio**;
-- can size any of them with an optional **volatility-targeting overlay** (the trend portfolio is always vol-scaled per asset);
-- reports **in-sample (IS) and out-of-sample (OOS)** performance with explicit, conservative accounting: an execution lag, per-leg costs, optional borrow fees and a long-only switch, and financing at the T-bill rate;
-- tests robustness: a **cost sweep with the break-even cost**, a parameter grid with a **deflated Sharpe ratio**, and **walk-forward** re-optimization;
-- projects forward risk with **Monte Carlo** (GBM, moving-block bootstrap and stationary bootstrap), checked against closed-form results;
-- shows everything in a React dashboard, with run history, and as a static, read-only demo of recorded results.
+This is a local research tool for one user. It backtests four daily strategies on US-listed stocks and ETFs: single-asset mean reversion, pairs trading (statistical arbitrage, with a rolling-OLS or Kalman-filter hedge ratio), time-series momentum (trend following) on one asset, and a multi-asset trend portfolio. Any of them can be sized with an optional volatility-targeting overlay, and the trend portfolio is always vol-scaled per asset.
+
+Performance is reported in-sample (IS) and out-of-sample (OOS), with explicit, conservative accounting: an execution lag, per-leg costs, optional borrow fees, a long-only switch, and financing at the T-bill rate. Robustness is tested with a cost sweep and its break-even cost, a parameter grid with a deflated Sharpe ratio, and walk-forward re-optimization. Forward risk is projected with Monte Carlo (GBM, a moving-block bootstrap and a stationary bootstrap), checked against closed-form results. Everything is shown in a React dashboard with a run history, and as a static, read-only demo of recorded results.
 
 **Stack:** Python (FastAPI, NumPy, pandas, SciPy, statsmodels, SQLAlchemy, yfinance; `arch` from Phase 7, §10.8); SQLite by default with optional PostgreSQL; React + TypeScript (Vite, Tailwind CSS v4, Recharts; Playwright for browser tests from Phase 8).
 
-**Non-goals (do not build):**
+**Non-goals.** Don't build any of these:
 - authentication or multiple users;
 - intraday data;
 - non-US exchanges or mixed trading calendars;
@@ -93,11 +89,14 @@ quant-engine/
         data_loader.py       # cache + the single network seam fetch_from_yahoo()
         strategies.py        # scores, entry/exit rules, unit weights  (pure)
         sizing.py            # volatility-targeting overlay             (pure)
-        pipeline.py          # run_strategy() (§5.0), run_sensitivity() (§9), run_walk_forward() (§9.2)  (pure)
+        pipeline.py          # StrategyParams, run_strategy() (§5.0)    (pure)
+        report.py            # build_report(): metrics, benchmark, chart series (§8, §11.3)  (pure)
+        sensitivity.py       # run_sensitivity(): the parameter grid, deflated Sharpe (§9)  (pure)
+        walk_forward.py      # run_walk_forward() (§9.2)               (pure)
         backtester.py        # lag, returns, costs, borrow, equity, trades  (pure)
         metrics.py           # metrics, cost sweep, rolling and calendar stats, warnings  (pure)
         stats.py             # Engle–Granger, half-life, Kalman filter, deflated Sharpe  (pure)
-        monte_carlo.py       # GBM, block and stationary bootstrap, closed form  (pure)
+        monte_carlo.py       # GBM, block and stationary bootstrap, closed form, their inputs  (pure)
     scripts/bench.py         # measured timings: the only source for runtime claims
     scripts/seed_e2e.py      # Phase 8: writes the offline database the browser tests use
     scripts/record_demo.py   # Phase 9: records the static demo's responses
@@ -109,6 +108,7 @@ quant-engine/
     scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
     public/demo/             # Phase 9: recorded responses for the static demo
   docs/METHODOLOGY.md        # §15
+  docs/ARCHITECTURE.md       # a plain-language tour of the code for new readers
   docs/screenshots/          # dashboard screenshots (Phase 3 on)
 ```
 - **Python:** 3.12 or later (developed on 3.14). List `tzdata` explicitly in the requirements: Windows has no system time-zone database, and `zoneinfo` needs one.
@@ -151,7 +151,7 @@ quant-engine/
   - Upsert every returned row with `ON CONFLICT (ticker, date) DO UPDATE` (overwrite), then set coverage to the union.
   - Write the rows and the coverage in **one transaction**.
   - Two concurrent requests for the same ticker are safe: both upserts overwrite with the same data.
-- **Why the union refetch:** Yahoo back-adjusts history. Every dividend rewrites all earlier adjusted closes, and every split rewrites all earlier closes (verified: KO's 2024-01-02 adjusted close reads 55.31 against a raw close of 59.82 when fetched in 2026). Rows fetched at different times are therefore on different adjustment bases, and stitching them together creates fake returns at the seam. Refetching the whole range keeps each ticker on one basis.
+- **Why refetch the whole union?** Yahoo back-adjusts history. Every dividend rewrites all earlier adjusted closes, and every split rewrites all earlier closes (verified: KO's 2024-01-02 adjusted close reads 55.31 against a raw close of 59.82 when fetched in 2026). Rows fetched at different times are therefore on different adjustment bases, and stitching them together creates fake returns at the seam. Refetching the whole range keeps each ticker on one basis.
 - Coverage records the **requested** range, not the dates actually returned. Otherwise a ticker that listed after `start` would be refetched on every request.
 - Upserts use the dialect-specific insert (`sqlalchemy.dialects.sqlite.insert` / `sqlalchemy.dialects.postgresql.insert`) with `.on_conflict_do_update(...)`.
   - **Chunk at 1,000 rows per statement.** SQLite accepts at most 32,766 bound parameters per statement (verified), and 20 years of one ticker × 8 columns exceeds that.
@@ -281,15 +281,9 @@ resid_var = vy - beta**2 * vx                            # = SSR / (L - 1)
 spread = (y - my) - beta * (x - mx)                      # OLS residual of today's point
 z = spread / np.sqrt(resid_var.where(resid_var > 1e-8 * vy))
 ```
-**Why this z-score.** It measures today's point against the OLS fit on the trailing window.
-- Do **not** compute y − β_t·x and then take a rolling mean and std of that. It mixes spreads built with different β values.
-- The identity uses `ddof=1` variances, so it matches the residual std with `ddof=1` (divide by L−1). It does not match the textbook OLS standard error, which divides by L−2.
+**Why this z-score.** It measures today's point against the OLS fit on the trailing window. Do **not** compute y − β_t·x and then take a rolling mean and std of that: the result mixes spreads built with different β values. The identity uses `ddof=1` variances, so it matches the residual std with `ddof=1` (dividing by L−1), not the textbook OLS standard error, which divides by L−2.
 
-**Why the 1e-8 threshold.**
-- For exactly collinear log prices, rounding leaves `resid_var / vy` at about 1e-11 to 1e-10 (measured). A 1e-12 guard lets that through and produces noise z-scores.
-- Real pairs sit far above 1e-8: a simulated share-class pair measured about 1e-4.
-- Rebasing cuts the rounding noise from up to 2.5e-10 to about 4e-12 (measured).
-- Don't clip negative values to 0. A zero denominator gives ±inf z-scores, and those trigger trades.
+**Why the 1e-8 threshold.** For exactly collinear log prices, rounding leaves `resid_var / vy` at about 1e-11 to 1e-10 (measured), and a 1e-12 guard would let that through and produce noise z-scores. Real pairs sit far above 1e-8; a simulated share-class pair measured about 1e-4. Rebasing helps too, cutting the rounding noise from up to 2.5e-10 to about 4e-12 (measured). Don't clip negative values to 0: a zero denominator gives ±inf z-scores, and those trigger trades.
 
 **Hedge ratio:**
 - `hedge_mode="fixed_at_entry"` (default): `beta_used = beta.where(signal.ne(signal.shift()) & signal.ne(0)).ffill()`. β is captured on the day a position opens (an entry from flat, or a direct flip) and held for the whole trade, so daily drift in β creates no turnover.
@@ -440,7 +434,7 @@ beta[t] = s[1]
 
 The §5.4 diagnostics are also unchanged. They test the pair, not the model.
 
-**Why the innovation z-score.** e_t is standardized by its own predicted variance, using only information through t−1. Under the model it is N(0, 1), so z_entry and z_exit keep roughly their §5.1 meaning. δ is itself a tuning parameter, and that is a limitation to document.
+**Why the innovation z-score.** e_t is standardized by its own predicted variance, using only information through t−1, so under the model it is N(0, 1) and z_entry and z_exit keep roughly their §5.1 meaning. δ is itself a tuning parameter, which is a limitation to document.
 
 ### 5.8 Strategy D: multi-asset trend portfolio (`strategy="trend_portfolio"`; Phase 7)
 Time-series momentum the way Moskowitz, Ooi & Pedersen (2012) applied it:
@@ -673,7 +667,7 @@ and a whole cost sweep comes from **one** run, with no re-running.
   - Strategies A and B: L ∈ {20, 40, 60, 90, 120} × z_entry ∈ {1.5, 2.0, 2.5, 3.0}, i.e. 20 configurations. `z_exit` comes from the request.
   - Strategies C and D: L ∈ {21, 63, 126, 252, 378} (1, 3, 6, 12 and 18 months), i.e. 5 configurations. There is no z_entry axis, so `z_entry_values` is `null` and the Sharpe matrix has a single column.
 - A request may override the grid, with at most 8 values per axis. Every z_entry must be greater than z_exit. For Strategy C, overriding `z_entry_values` is ignored.
-- **Implementation.** `pipeline.run_sensitivity(prices, rf, params, grid)` is a pure function that implements the grid; the endpoint only calls it. It loops over the configurations (this loop is allowed), in three steps:
+- **Implementation.** `sensitivity.run_sensitivity(prices, rf, params, grid)` is a pure function that implements the grid; the endpoint only calls it. It loops over the configurations (this loop is allowed), in three steps:
   1. **Resolve the split once**, for the request's own configuration: `split_date = resolve_split(...)`, exactly as `/api/backtest` would.
   2. **Run every configuration** through `run_strategy` (§5.0) with **its own** t₀, passing that same `split_date` as the requested split. Without it, each configuration would compute its own 70% split and the window would no longer be common.
      - Do **not** force the grid's latest t₀ onto shorter-lookback configurations. They start signaling earlier, so §6.1's "no signal before t₀" check would raise `ValueError`.
@@ -724,7 +718,7 @@ Picking the best of N configurations inflates its Sharpe ratio even when no conf
 ### 9.2 Walk-forward analysis (`POST /api/walk-forward`; Phase 6)
 The sensitivity grid picks parameters on in-sample data, but the user then reads OOS results and iterates, which quietly turns OOS into IS (§15). Walk-forward makes the selection part of the protocol: in each fold, choose on the training window, trade the choice on the next test window, and stitch the test windows into one out-of-sample track record.
 
-`pipeline.run_walk_forward(prices, rf, params, grid, train_days, test_days, anchored)` is pure. The endpoint only calls it.
+`walk_forward.run_walk_forward(prices, rf, params, grid, train_days, test_days, anchored)` is pure. The endpoint only calls it.
 
 1. **Run the grid.** Same grid and overrides as §9, each configuration through `run_strategy` with its own t₀ and the request's resolved split. The split only satisfies `run_strategy`; walk-forward has no IS/OOS split of its own. Keep, for each configuration:
    - its untruncated executed weights w = W.shift(k).fillna(0.0) (§5.0);
@@ -1068,10 +1062,7 @@ From Phase 7 the suite runs in parallel with pytest-xdist (`-n auto` in `pyproje
   - a cointegrated pair (Y, X);
   - SPY;
   - `^IRX`, held constant at 2.0 (i.e. 2%).
-- **Why 1,000 days.** The API rejects shorter series.
-  - With L = 120 and k = 1, a 1,000-day series leaves 880 evaluated days: 616 IS and 264 OOS.
-  - Trend at its maximum L = 504, with monthly sampling, still leaves about 474 evaluated days: about 331 IS and 143 OOS.
-  - Trend's default sensitivity grid (largest L = 378) keeps a common IS window longer than 252 days.
+- **Why 1,000 days.** The API rejects shorter series. With L = 120 and k = 1, a 1,000-day series leaves 880 evaluated days, 616 IS and 264 OOS. Trend at its maximum L = 504, with monthly sampling, still leaves about 474 evaluated days, about 331 IS and 143 OOS. And trend's default sensitivity grid (largest L = 378) keeps a common IS window longer than 252 days.
 - Short hand-built series are fine for unit tests that call pure functions directly.
 - **Database.** Each test gets a temp-file SQLite database (`tmp_path`), wired in with a dependency override.
 - **Shared generator (Phase 8).** The synthetic market moves to `tests/synthetic.py`, so `scripts/seed_e2e.py` can write the same data into the browser tests' database (§12, "Browser tests").
@@ -1188,7 +1179,7 @@ From Phase 7 the suite runs in parallel with pytest-xdist (`-n auto` in `pyproje
     - a window that starts mid-month marks its first month `partial`.
 
 ### `test_sensitivity.py`
-These test `pipeline.run_sensitivity` directly.
+These test `sensitivity.run_sensitivity` directly.
 - **Own t₀ per configuration.** The default A/B grid and the default trend grid run on the 1,000-day fixture with no `ValueError`, even though shorter lookbacks signal before the grid's latest t₀.
 - **One split for all.** Every configuration is evaluated with the request's resolved `split_date`, and the reported window equals [latest first-evaluated day, `split_date`).
 - **Slice scoring.** Each cell equals the §8 Sharpe of that configuration's daily excess returns on the common window, recomputed independently in the test.
@@ -1469,7 +1460,7 @@ These run in CI (§3) and locally (`npx playwright test` in `frontend/`), never 
 
 ### Static demo (Phase 9)
 A read-only build of the dashboard that runs without a backend. It is deployed to GitHub Pages so reviewers can see the project without installing it.
-- **Build.** `VITE_DEMO=1 npm run build`, or `npm run build:demo` (`vite build --mode demo`, which works in PowerShell), with Vite's `base` set to the repository path: `/Quantative-Backtesting-Engine/` by default, or `DEMO_BASE`, which `pages.yml` sets from the repository's name. Other builds leave `public/demo/` out of their output.
+- **Build.** `VITE_DEMO=1 npm run build`, or `npm run build:demo` (`vite build --mode demo`, which works in PowerShell), with Vite's `base` set to the repository path: `/Quantitative-Backtesting-Engine/` by default, or `DEMO_BASE`, which `pages.yml` sets from the repository's name. Other builds leave `public/demo/` out of their output.
 - **Replay.** In demo mode, `api.ts` swaps its fetch wrappers for a replay module (`src/demo.ts`). It looks up `public/demo/manifest.json`, which maps a canonical request key to a recorded response file, in one table per endpoint, because the backtest and the sensitivity grid send the same body. The key is the request's JSON with sorted keys; the dashboard re-serializes the manifest's keys before comparing, so number formatting (Python's 2.0, JavaScript's 2) can't break a match. The manifest also holds the recording date, the last data date, the engine version and each scenario's requests.
   - A request that isn't recorded shows "This configuration isn't in the demo. Run the project locally for live data."
   - Run history is hidden in demo mode, and the run header shows "recorded" instead of a run id.
@@ -1565,7 +1556,7 @@ Stop at the end of every phase (§0, rule 5).
 | Phase | Scope | Done when |
 |---|---|---|
 | 0. Scaffold | `git init`, §3 layout, tooling, CI, `.env.example`, empty app | `ruff check`, `pytest` (collects) and `npm run build` succeed in PowerShell |
-| 1. Core math | `pipeline` (`run_strategy`, `run_sensitivity`), `strategies` (A, B, C), `sizing`, `backtester` (with `resolve_split`), `metrics`, `stats`, `monte_carlo` and their test files; synthetic data only | those tests pass, including the perturbation (all strategies, overlay on and off), reconciliation, vol-tracking and closed-form tests |
+| 1. Core math | `pipeline` (`run_strategy`), `sensitivity` (`run_sensitivity`), `strategies` (A, B, C), `sizing`, `backtester` (with `resolve_split`), `metrics`, `stats`, `monte_carlo` and their test files; synthetic data only | those tests pass, including the perturbation (all strategies, overlay on and off), reconciliation, vol-tracking and closed-form tests |
 | 2. Data + API | models, cache, loader, endpoints, serialization, `test_data_loader`, `test_api` | the full suite passes, and one real KO/PEP backtest via `/docs` succeeds (network allowed in this check only) |
 | 3. Frontend | §13 | lint, Vitest and build pass; a manual run against the local API; screenshots |
 | 4. Docs + bench | §15, `scripts/bench.py`, and the diagnostics cache only if the bench misses its target (§14) | every formula in this file is justified in METHODOLOGY.md; README numbers come from bench output |

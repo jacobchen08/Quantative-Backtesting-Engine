@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 
 from app.services.monte_carlo import ModelResult, MonteCarloResult
-from app.services.pipeline import BacktestReport, SensitivityResult, WalkForwardResult
+from app.services.report import BacktestReport
+from app.services.sensitivity import SensitivityResult
+from app.services.walk_forward import WalkForwardResult
 
 
 def to_jsonable(obj: Any) -> Any:

@@ -103,7 +103,7 @@ const BENCHMARK_ROWS = METRIC_ROWS.filter((row) =>
 
 const num = (x: number | null | undefined) => (x == null ? DASH : String(x))
 
-/** "Rolling OLS" or "Kalman δ 1e-6" for pairs; a run stored before Phase 7 had only rolling OLS. */
+/** "Rolling OLS" or "Kalman δ 1e-6" for pairs; a run stored before the Kalman model existed is rolling OLS. */
 function pairsModelLabel(r: StoredRun['resolved']): string {
   if (r.strategy !== 'pairs') return DASH
   return r.pairs_model === 'kalman' ? `Kalman δ ${r.kalman_delta == null ? DASH : r.kalman_delta.toExponential()}` : 'Rolling OLS'

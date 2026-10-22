@@ -121,6 +121,17 @@ def test_normalize_flattens_a_multiindex_and_uses_ns_dates(yf_frame) -> None:
     assert out["adj_close"].tolist() == [10.0, 11.0]
 
 
+def test_prices_read_back_with_close_and_adjusted_close_apart(session: Session, fake_yahoo, yf_frame) -> None:
+    days = pd.bdate_range("2019-01-02", periods=3)
+    fake_yahoo.frames["DIV"] = yf_frame(
+        pd.Series([9.0, 9.5, 9.25], index=days), close=pd.Series([10.0, 10.5, 10.2], index=days)
+    )
+    data_loader.ensure_cached(session, "DIV", days[0].date(), days[-1].date())
+    out = data_loader.read_prices(session, "DIV", days[0].date(), days[-1].date())
+    assert out["close"].tolist() == [10.0, 10.5, 10.2] and out["adj_close"].tolist() == [9.0, 9.5, 9.25]
+    assert out.index.equals(pd.DatetimeIndex(days, name="date").as_unit("ns"))
+
+
 # ---------------------------------------------------------------- cache hits and refetches
 
 

@@ -155,28 +155,37 @@ def daily_returns(
 
     run_backtest applies this to W.shift(k), and the walk-forward (§9.2) to its stitched weights.
     """
+    # Plain arrays: rows are days, columns are legs. pandas gives the same floats about 15
+    # times slower, which adds up over the 21 backtests of a grid.
     c = cost_bps / 10_000  # one-way, per unit of traded notional, per leg
-    w_prev = w.shift(1).fillna(0.0)  # weights held into day t
-    R = R.copy()
-    R.iloc[0] = 0.0  # only the first row may be NaN
-    if not np.isfinite(R.to_numpy()).all() or not np.isfinite(rf.to_numpy()).all():
+    w_now = w.to_numpy(dtype=float)
+    w_prev = np.zeros_like(w_now)  # weights held into day t; flat into day 0
+    w_prev[1:] = w_now[:-1]
+    r = R.to_numpy(dtype=float, copy=True)
+    r[0] = 0.0  # only the first row may be NaN
+    rf_day = rf.to_numpy(dtype=float)
+    if not np.isfinite(r).all() or not np.isfinite(rf_day).all():
         raise ValueError("R (after its first row) and rf must be finite")  # .sum() would hide NaN as 0
-    gross_excess = (w_prev * R.sub(rf, axis=0)).sum(axis=1)
-    shorts = (-w_prev).clip(lower=0).sum(axis=1)  # short notional held into day t
+    gross_excess = (w_prev * (r - rf_day[:, None])).sum(axis=1)
+    shorts = np.clip(-w_prev, 0.0, None).sum(axis=1)  # short notional held into day t
     borrow = (borrow_bps / 10_000 / 252) * shorts  # charged daily on it
-    turnover = (w - w_prev).abs().sum(axis=1)  # every leg counts
+    turnover = np.abs(w_now - w_prev).sum(axis=1)  # every leg counts
     cost = c * turnover  # charged on the trade day
     excess = gross_excess - borrow - cost  # daily return in excess of rf
-    total = rf + excess  # daily total return (cash earns rf)
+    total = rf_day + excess  # daily total return (cash earns rf)
+
+    def series(values: np.ndarray) -> pd.Series:
+        return pd.Series(values, index=R.index)
+
     return DailyReturns(
-        w_prev=w_prev,
-        gross_held=w_prev.abs().sum(axis=1),
-        gross_excess=gross_excess,
-        borrow=borrow,
-        turnover=turnover,
-        cost=cost,
-        excess=excess,
-        total=total,
+        w_prev=pd.DataFrame(w_prev, index=R.index, columns=R.columns),
+        gross_held=series(np.abs(w_prev).sum(axis=1)),
+        gross_excess=series(gross_excess),
+        borrow=series(borrow),
+        turnover=series(turnover),
+        cost=series(cost),
+        excess=series(excess),
+        total=series(total),
     )
 
 
@@ -269,15 +278,12 @@ def run_backtest(
     d = daily_returns(w=w, R=R, rf=rf, cost_bps=cost_bps, borrow_bps=borrow_bps)
     gross_excess, borrow, cost, excess, total = d.gross_excess, d.borrow, d.cost, d.excess, d.total
 
-    # §7: trades are runs of non-zero, same-sign executed position (per leg for the trend portfolio).
+    # A position held into day t earns its P&L; for the trend portfolio, any leg's (§5.8).
     leg_pos = None if leg_signals is None else leg_signals.shift(k).fillna(0.0)
     if leg_pos is None:
-        trade_id = _trade_ids(pos)
-        held_id = trade_id.shift(1)  # the trade that earns day t's P&L
-        held = held_id.notna()
+        held = pos.shift(1, fill_value=0.0) != 0
     else:
-        local_id = leg_pos.apply(_trade_ids)  # numbered within each leg; renumbered below
-        held = local_id.shift(1).notna().any(axis=1)  # any leg held into day t (§5.8)
+        held = (leg_pos.shift(1, fill_value=0.0) != 0).any(axis=1)
 
     # §6.2 ruin: the first evaluated day with total <= -1 ends the window.
     credit = 0.0
@@ -289,12 +295,13 @@ def run_backtest(
             raise ValueError("ruin on a day with no position held into it; the cost inputs are out of range")
         credit = clip_ruin_day(excess, total, rf, r)  # >= 0, credited to the trade(s) held into r
 
-    # §7.1 attribution follows P&L timing, within the evaluation window.
+    # §7: trades are runs of non-zero, same-sign executed position (per leg for the trend
+    # portfolio). §7.1 attribution follows P&L timing, within the evaluation window.
     window = slice(e, stop)  # every day before e is flat with zero weights
-    pnl = records = None
-    if not trades:
-        trade_id = held_id = None
-    elif leg_pos is None:
+    trade_id = held_id = pnl = records = None
+    if trades and leg_pos is None:
+        trade_id = pd.Series(_trade_ids(pos.to_numpy()), index=calendar)
+        held_id = trade_id.shift(1)  # the trade that earns day t's P&L
         credit_by_day = pd.Series(0.0, index=calendar)
         if ruined:
             credit_by_day.iloc[r] = credit
@@ -312,9 +319,9 @@ def run_backtest(
         records = _trade_records(pnl, trade_id.iloc[:stop], held_id.iloc[:stop], pos, calendar, k, split)
         records["ticker"] = None
         trade_id, held_id = trade_id.rename("trade_id"), held_id.rename("held_id")
-    else:
+    elif trades:
         trade_id, pnl, records = _leg_trades(
-            local_id=local_id,
+            local_id=_trade_ids(leg_pos.to_numpy()),
             leg_pos=leg_pos,
             w=w,
             w_prev=d.w_prev,
@@ -388,13 +395,14 @@ def _validate_inputs(
         raise ValueError(f"need k >= 0, t0 >= 0 and t0 + k >= 1 (a baseline day); got t0={t0}, k={k}")
     if t0 + k >= len(R):
         raise ValueError(f"t0 + k = {t0 + k} leaves no evaluated day in {len(R)} rows")
-    if not (s.iloc[:t0] == 0).all():
+    signal, weights = s.to_numpy(dtype=float), W.to_numpy(dtype=float)
+    if not (signal[:t0] == 0).all():
         raise ValueError(f"the signal is non-zero before t0={t0}")
-    if not s.isin([-1.0, 0.0, 1.0]).all():
+    if not np.isin(signal, (-1.0, 0.0, 1.0)).all():
         raise ValueError("the signal must take values in {-1, 0, +1}")
-    if not np.isfinite(W.to_numpy()).all():
+    if not np.isfinite(weights).all():
         raise ValueError("W must be finite")
-    if not (W.loc[s == 0] == 0).all().all():
+    if not (weights[signal == 0] == 0).all():
         raise ValueError("W must be exactly 0 on days the signal is flat")
     if not cost_bps >= 0:
         raise ValueError(f"cost_bps must be >= 0, got {cost_bps}")
@@ -408,17 +416,24 @@ def _validate_leg_signals(R: pd.DataFrame, W: pd.DataFrame, s: pd.Series, leg_si
     """Checks for per-leg trades (§5.8): aligned legs, and s the invested flag they imply."""
     if not (leg_signals.index.equals(R.index) and leg_signals.columns.equals(R.columns)):
         raise ValueError("leg_signals must have exactly the index and columns of R")
-    if not leg_signals.isin([-1.0, 0.0, 1.0]).all().all():
+    legs, weights = leg_signals.to_numpy(dtype=float), W.to_numpy(dtype=float)
+    if not np.isin(legs, (-1.0, 0.0, 1.0)).all():
         raise ValueError("every leg signal must take values in {-1, 0, +1}")
-    if not ((W != 0) <= (leg_signals != 0)).all().all():
+    if not (weights[legs == 0] == 0).all():
         raise ValueError("W must be exactly 0 wherever that leg's signal is flat")
-    if not np.array_equal(s.to_numpy(), leg_signals.ne(0).any(axis=1).to_numpy(dtype=float)):
+    if not np.array_equal(s.to_numpy(), (legs != 0).any(axis=1).astype(float)):
         raise ValueError("s must be the invested flag: 1 where any leg's signal is non-zero, else 0")
 
 
-def _trade_ids(pos: pd.Series) -> pd.Series:
-    """§7: trade ids 1, 2, ... for runs of non-zero, same-sign executed position; NaN when flat."""
-    return (pos.ne(pos.shift()) & pos.ne(0)).cumsum().where(pos.ne(0))
+def _trade_ids(pos: np.ndarray) -> np.ndarray:
+    """§7: trade ids 1, 2, ... for runs of non-zero, same-sign executed position; NaN when flat.
+
+    pos has one row per day, and optionally one column per leg, each numbered on its own.
+    """
+    changed = np.ones(pos.shape, dtype=bool)  # the first day differs from the day before it
+    changed[1:] = pos[1:] != pos[:-1]
+    ids = np.cumsum(changed & (pos != 0), axis=0)
+    return np.where(pos != 0, ids, np.nan)
 
 
 def _attribute(
@@ -456,7 +471,7 @@ def _attribute(
 
 def _leg_trades(
     *,
-    local_id: pd.DataFrame,
+    local_id: np.ndarray,
     leg_pos: pd.DataFrame,
     w: pd.DataFrame,
     w_prev: pd.DataFrame,
@@ -479,13 +494,16 @@ def _leg_trades(
     return (§7.2). A ruin-day credit is split across the legs held into that day in proportion to
     their gross weight |w_{i,r-1}|.
 
+    Args:
+        local_id: _trade_ids of each leg's executed position, numbered within the leg.
+
     Returns:
         (trade_id, pnl, trades): trade ids per leg as a DataFrame, renumbered 1... across the
         portfolio in order of entry date and then ticker; P&L per renumbered id; the trade records
         with each trade's ticker.
 
-    This is the formulas of _attribute and _trade_records written with numpy arrays, because it
-    runs once per leg.
+    These are the formulas of _attribute and _trade_records written with numpy arrays, because
+    they run once per leg.
     """
     calendar = R.index
     e = window.start
@@ -504,69 +522,78 @@ def _leg_trades(
     if ruin_day is not None:  # split by the gross weight held into the ruin day
         to_held[ruin_day] += credit * a[ruin_day] / a[ruin_day].sum()
 
-    local = local_id.to_numpy(dtype=float)
+    # One row per trade, gathered leg by leg: the leg, its number within the leg, the calendar
+    # positions of its entry and last held day (-1 while open), its days held and its P&L.
+    n_legs = R.shape[1]
+    local = np.nan_to_num(local_id, nan=0.0).astype(np.int64)  # 0 = flat
     pos = leg_pos.to_numpy(dtype=float)
-    records = []
-    for j, leg in enumerate(R.columns):
-        ids = np.nan_to_num(local[:stop, j], nan=0.0).astype(np.int64)  # 0 = flat
+    parts: dict[str, list[np.ndarray]] = {
+        name: [] for name in ("leg", "local", "entry", "exit", "days", "pnl")
+    }
+    sl = slice(e, stop)
+    for j in range(n_legs):
+        ids = local[:stop, j]
         held = np.r_[0, ids[:-1]]  # held_id: the trade that earns day t's P&L
         m = int(ids.max(initial=0))
         if m == 0:
             continue
-        sl = slice(e, stop)
         pnl = (
             np.bincount(held[sl], weights=to_held[sl, j], minlength=m + 1)
             + np.bincount(ids[sl], weights=to_trade[sl, j], minlength=m + 1)
         )[1:]
-        entry = np.flatnonzero((ids != np.r_[0, ids[:-1]]) & (ids > 0))  # trade i + 1 starts at entry[i]
-        holding = np.bincount(held, minlength=m + 1)[1:]
         last_held = np.full(m + 1, -1)
         held_days = np.flatnonzero(held)
         np.maximum.at(last_held, held[held_days], held_days)
         is_open = np.arange(1, m + 1) == ids[-1]  # still held at the end of the last day
-        exit_pos = np.where(is_open, -1, last_held[1:])
-        closed = ~is_open
-        exit_date = np.full(m, np.datetime64("NaT", "ns"))
-        exit_signal = exit_date.copy()
-        exit_date[closed] = calendar[exit_pos[closed]]
-        exit_signal[closed] = calendar[exit_pos[closed] - k]
-        entry_date = calendar[entry]
-        records.append(
-            pd.DataFrame(
-                {
-                    "local": np.arange(1, m + 1),
-                    "side": np.where(pos[entry, j] > 0, "long", "short"),
-                    "segment": np.where(entry_date < split, "is", "oos"),
-                    "open": is_open,
-                    "signal_date": calendar[entry - k],
-                    "entry_date": entry_date,
-                    "exit_signal_date": exit_signal,
-                    "exit_date": exit_date,
-                    "holding_days": holding.astype(np.int64),
-                    "pnl": pnl,
-                    "ticker": leg,
-                    "leg": j,
-                }
-            )
-        )
-    columns = ["id", "side", "segment", "open", "signal_date", "entry_date", "exit_signal_date"]
-    columns += ["exit_date", "holding_days", "pnl", "ticker"]
-    trade_id = pd.DataFrame(np.nan, index=calendar, columns=R.columns)
-    if not records:  # no leg ever traded
+        parts["leg"].append(np.full(m, j))
+        parts["local"].append(np.arange(1, m + 1))
+        parts["entry"].append(np.flatnonzero((ids != held) & (ids > 0)))  # trade i + 1 starts at entry[i]
+        parts["exit"].append(np.where(is_open, -1, last_held[1:]))
+        parts["days"].append(np.bincount(held, minlength=m + 1)[1:])
+        parts["pnl"].append(pnl)
+
+    if not parts["leg"]:  # no leg ever traded
         flat = pd.Series(np.nan, index=calendar[:stop])
         trades = _trade_records(pd.Series(dtype=float), flat, flat, leg_pos.iloc[:, 0], calendar, k, split)
         trades["ticker"] = None
+        trade_id = pd.DataFrame(np.nan, index=calendar, columns=R.columns)
         return trade_id, pd.Series(dtype=float, index=pd.Index([], name="id")), trades
-    trades = pd.concat(records, ignore_index=True).sort_values(["entry_date", "ticker"], kind="stable")
-    trades.insert(0, "id", np.arange(1, len(trades) + 1, dtype=np.int64))
-    for j, leg_trades in trades.groupby("leg"):
-        new = np.full(int(np.nanmax(local[:, j])) + 1, np.nan)  # trades after a ruin day stay unnumbered
-        new[leg_trades["local"].to_numpy()] = leg_trades["id"].to_numpy()
-        valid = ~np.isnan(local[:, j])
-        trade_id.iloc[valid, j] = new[local[valid, j].astype(np.int64)]
-    trades = trades[columns].reset_index(drop=True)
-    pnl = pd.Series(trades["pnl"].to_numpy(), index=pd.Index(trades["id"].to_numpy(), name="id"))
-    return trade_id, pnl, trades
+
+    # Portfolio-wide ids follow entry date, then ticker.
+    leg, local_no, entry, exit_pos, days, pnl = (np.concatenate(parts[key]) for key in parts)
+    tickers = R.columns.to_numpy()
+    ticker_rank = np.argsort(np.argsort(tickers.astype(str)))  # alphabetical position of each leg
+    order = np.lexsort((ticker_rank[leg], entry))  # the last key sorts first
+    leg, local_no, entry, exit_pos, days, pnl = (
+        x[order] for x in (leg, local_no, entry, exit_pos, days, pnl)
+    )
+    ids = np.arange(1, len(order) + 1, dtype=np.int64)
+    renumber = np.full((n_legs, local.max() + 1), np.nan)  # trades after a ruin day stay unnumbered
+    renumber[leg, local_no] = ids
+    trade_id = pd.DataFrame(renumber[np.arange(n_legs), local], index=calendar, columns=R.columns)
+
+    is_open = exit_pos < 0
+    exit_date = np.full(len(ids), np.datetime64("NaT", "ns"))
+    exit_signal = exit_date.copy()
+    exit_date[~is_open] = calendar[exit_pos[~is_open]]
+    exit_signal[~is_open] = calendar[exit_pos[~is_open] - k]
+    entry_date = calendar[entry]
+    trades = pd.DataFrame(
+        {
+            "id": ids,
+            "side": np.where(pos[entry, leg] > 0, "long", "short"),
+            "segment": np.where(entry_date < split, "is", "oos"),
+            "open": is_open,
+            "signal_date": calendar[entry - k],
+            "entry_date": entry_date,
+            "exit_signal_date": exit_signal,
+            "exit_date": exit_date,
+            "holding_days": days.astype(np.int64),
+            "pnl": pnl,
+            "ticker": tickers[leg],
+        }
+    )
+    return trade_id, pd.Series(pnl, index=pd.Index(ids, name="id")), trades
 
 
 def _trade_records(

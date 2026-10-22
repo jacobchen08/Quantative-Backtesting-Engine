@@ -1,7 +1,7 @@
 // Run settings (§13): the strategy switch, then one section per group of settings
 // (SidebarSections.tsx). Nothing is sent until Run is pressed.
 //
-// In the static demo (Phase 9) a scenario picker heads the sidebar and every other input is
+// In the static demo a scenario picker heads the sidebar and every other input is
 // read-only: only the recorded scenarios can be replayed (§13, "Static demo").
 import type { Dispatch, SetStateAction } from 'react'
 import type { DemoScenario } from '../demo'

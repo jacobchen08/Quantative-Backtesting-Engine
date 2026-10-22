@@ -10,7 +10,8 @@ import pytest
 
 from app.services import sizing, stats
 from app.services.backtester import NoValidScoreError, run_backtest
-from app.services.pipeline import StrategyParams, build_report, run_strategy
+from app.services.pipeline import StrategyParams, run_strategy
+from app.services.report import build_report
 from app.services.strategies import (
     first_of_period,
     hysteresis_signal,
@@ -366,7 +367,7 @@ def test_sized_weights_are_exactly_zero_when_flat(
     assert not run.weights.isna().any().any()
 
 
-# ---------------------------------------------------------------- 9. Kalman pairs model (Phase 7)
+# ---------------------------------------------------------------- 9. Kalman pairs model
 
 
 def reference_kalman(y: np.ndarray, x: np.ndarray, L: int, delta: float) -> tuple[np.ndarray, ...]:
@@ -498,7 +499,7 @@ def test_kalman_pairs_feed_the_unchanged_pairs_pipeline(
     assert not np.array_equal(ols.score.to_numpy(), run.score.to_numpy(), equal_nan=True)
 
 
-# ---------------------------------------------------------------- 10. trend portfolio (Phase 7)
+# ---------------------------------------------------------------- 10. trend portfolio
 
 PORTFOLIO = ("T08", "T15", "T20", "T30")
 
@@ -657,7 +658,7 @@ def test_trend_portfolio_needs_two_to_twelve_distinct_tickers_and_a_vol_target()
     assert portfolio_params(tickers=tuple(f"A{i}" for i in range(12))).tickers[-1] == "A11"
 
 
-# ---------------------------------------------------------------- 11. long-only switch (Phase 5)
+# ---------------------------------------------------------------- 11. long-only switch
 
 LONG_ONLY_CASES = [
     {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40},

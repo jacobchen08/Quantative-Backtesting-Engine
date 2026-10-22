@@ -12,7 +12,7 @@ function render(node: ReactNode) {
 }
 
 if (DEMO) {
-  // The static demo (Phase 9) needs its manifest before the first render: its scenarios are the
+  // The static demo needs its manifest before the first render: its scenarios are the
   // sidebar's defaults.
   loadManifest().then(
     (manifest) => render(<App demo={manifest} />),

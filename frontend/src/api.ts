@@ -1,7 +1,7 @@
-// Typed fetch wrappers for the API's endpoints (§11.1): four POSTs and, from Phase 8, the GETs of
+// Typed fetch wrappers for the API's endpoints (§11.1): four POSTs and the GETs of
 // the health check and the run history (§11.4). Every error the API returns is
 // {"detail": "..."}; ApiError carries that string so the views can show it verbatim (§13).
-// In the static demo (Phase 9) the four POSTs are replayed from recorded responses instead (demo.ts).
+// In the static demo the four POSTs are replayed from recorded responses instead (demo.ts).
 import { DEMO, replay } from './demo'
 import type {
   BacktestRequest,

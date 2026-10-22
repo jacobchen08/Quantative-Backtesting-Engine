@@ -11,16 +11,10 @@ import pytest
 
 from app.services import metrics
 from app.services.backtester import BacktestResult, InsufficientDataError, resolve_split, run_backtest
-from app.services.monte_carlo import MonteCarloInputError
-from app.services.pipeline import (
-    StrategyParams,
-    StrategyRun,
-    WalkForwardResult,
-    build_report,
-    run_strategy,
-    run_walk_forward,
-    strategy_mc_returns,
-)
+from app.services.monte_carlo import MonteCarloInputError, strategy_returns
+from app.services.pipeline import StrategyParams, StrategyRun, run_strategy
+from app.services.report import build_report
+from app.services.walk_forward import WalkForwardResult, run_walk_forward
 
 OVERLAYS = [None, "daily", "weekly", "monthly"]
 
@@ -61,7 +55,7 @@ PERTURBATION_CASES = (
                 "mean-reversion",
                 {"borrow_bps": 500.0, "execution_lag": 0, "vol_target": 0.10, "vol_refresh": "daily"},
             ),
-            # Phase 7: the Kalman model and the trend portfolio.
+            # The Kalman model and the trend portfolio.
             ("pairs-kalman-fixed-k1", "pairs-fixed", {"pairs_model": "kalman", "execution_lag": 1}),
             (
                 "pairs-kalman-rolling-weekly-k2",
@@ -356,7 +350,7 @@ def test_trade_pnl_reconciles_with_excess_returns(synthetic_prices, varying_rf) 
 
 
 def test_per_leg_trades_reconcile_and_never_overlap(synthetic_prices, universe, varying_rf) -> None:
-    """§12 item 12 (Phase 7): the trend portfolio's leg trades over at least 50 random runs."""
+    """§12 item 12: the trend portfolio's leg trades over at least 50 random runs."""
     rng = np.random.default_rng(77)
     worst, runs, flips, resized = 0.0, 0, 0, 0
     pool = ["T08", "T15", "T20", "T30", "X", "SPY"]
@@ -689,6 +683,7 @@ def test_backtester_input_validation() -> None:
         # Additions to the §6.1 list, which the trade bookkeeping relies on:
         "a weight on a flat day": {"W": pd.DataFrame({"A": [0, 1, 1, 0, 0.5, 0]}, index=DATES, dtype=float)},
         "a signal outside {-1, 0, 1}": {"s": s * 0.5, "W": (s * 0.5).to_frame("A")},
+        "a signal of 2": {"s": s * 2, "W": (s * 2).to_frame("A")},
         "a NaN return after the first row": {"R": R_nan},
     }
     for name, change in bad.items():
@@ -697,6 +692,38 @@ def test_backtester_input_validation() -> None:
             pytest.fail(f"accepted {name}")
     with pytest.raises(TypeError):
         run_backtest(**{**good, "rf": zero.to_numpy()})
+
+
+def test_per_leg_input_validation() -> None:
+    """The trend portfolio's extra checks (§5.8): leg signals in {-1, 0, 1}, no weight on a flat
+    leg, and s the invested flag those signals imply."""
+    legs = pd.DataFrame({"A": [0, 1, 1, 0, 0, 0], "B": [0, 0, -1, -1, 0, 0]}, index=DATES, dtype=float)
+    R = pd.concat([TOY_R, TOY_R.rename(columns={"A": "B"}) * -1], axis=1)
+    invested = legs.ne(0).any(axis=1).astype(float)
+    good = {
+        "R": R,
+        "W": legs / 2,
+        "s": invested,
+        "rf": pd.Series(0.0, index=DATES),
+        "t0": 1,
+        "k": 0,
+        "cost_bps": 10.0,
+        "borrow_bps": 0.0,
+        "E0": 1.0,
+        "split_date": DATES[4],
+        "leg_signals": legs,
+    }
+    run_backtest(**good)
+    on_flat_leg = (legs / 2).assign(B=[0, 0.5, -0.5, -0.5, 0, 0])  # B is flat on day 1
+    bad = {
+        "a weight on a flat leg": {"W": on_flat_leg},
+        "a leg signal of 2": {"leg_signals": legs * 2, "W": legs},
+        "s that is not the invested flag": {"s": invested.shift(1, fill_value=0.0)},
+    }
+    for name, change in bad.items():
+        with pytest.raises(ValueError):
+            run_backtest(**{**good, **change})
+            pytest.fail(f"accepted {name}")
 
 
 @pytest.mark.parametrize("n", [650, 880, 1000])
@@ -789,7 +816,7 @@ def test_ruin_in_sample_ends_the_window_and_nulls_oos() -> None:
     assert abs(bt.pnl.sum() - bt.excess.iloc[bt.e : bt.stop].sum()) < 1e-9
     for window in ("full", "is"):
         with pytest.raises(MonteCarloInputError, match="ruin day"):
-            strategy_mc_returns(run, window)
+            strategy_returns(run, window)
 
 
 def test_ruin_on_the_first_oos_day_leaves_a_one_day_segment() -> None:
@@ -807,10 +834,10 @@ def test_ruin_on_the_first_oos_day_leaves_a_one_day_segment() -> None:
     assert oos.total_return == -1.0 and oos.max_drawdown == -1.0
     bench = report.benchmark_metrics["oos"]
     assert bench.n_days == 1 and bench.ann_vol is None and bench.sharpe is None
-    R, exposed = strategy_mc_returns(run, "is")  # the IS window doesn't contain the ruin day
+    R, exposed = strategy_returns(run, "is")  # the IS window doesn't contain the ruin day
     assert exposed and len(R) == r - run.backtest.e
     with pytest.raises(MonteCarloInputError):
-        strategy_mc_returns(run, "full")
+        strategy_returns(run, "full")
 
 
 # ---------------------------------------------------------------- 10. pct_days_at_cap
@@ -854,7 +881,7 @@ def test_pct_days_at_cap_is_null_when_never_invested_or_overlay_off(
     assert build_report(run_strategy(prices, rf, replace(never, vol_target=None))).sizing is None
 
 
-# ---------------------------------------------------------------- 11. borrow fee (Phase 5)
+# ---------------------------------------------------------------- 11. borrow fee
 
 
 def test_a_constant_short_pays_exactly_the_borrow_fee() -> None:
@@ -899,11 +926,11 @@ def test_a_zero_borrow_fee_changes_nothing(prices: pd.DataFrame, varying_rf) -> 
     ):
         bt = run_strategy(prices, rf, params).backtest
         assert params.borrow_bps == 0.0 and (bt.borrow == 0.0).all()
-        # Bit for bit the formula before Phase 5: excess = gross_excess - cost.
+        # Bit for bit the formula without a borrow fee: excess = gross_excess - cost.
         assert np.array_equal(bt.excess.to_numpy(), (bt.gross_excess - bt.cost).to_numpy())
 
 
-# ---------------------------------------------------------------- 13. cost sweep and break-even (Phase 5)
+# ---------------------------------------------------------------- 13. cost sweep and break-even
 
 
 def segment_sharpe(bt: BacktestResult, bounds: tuple[int, int], excess: pd.Series) -> float | None:
@@ -1005,7 +1032,7 @@ def test_a_cost_that_ruins_the_run_nulls_the_segments_from_its_ruin_day(
         assert (sweep.break_even_bps[name] is None) == (a <= ruin_day < b)  # -99.5% before costs: losing
 
 
-# ---------------------------------------------------------------- 14. rolling and calendar stats (Phase 5)
+# ---------------------------------------------------------------- 14. rolling and calendar stats
 
 
 @pytest.mark.parametrize("strategy, tickers", [("pairs", ("Y", "X")), ("trend", ("SPY",))])

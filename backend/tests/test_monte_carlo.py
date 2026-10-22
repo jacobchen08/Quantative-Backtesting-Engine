@@ -12,8 +12,8 @@ from scipy.signal import lfilter
 from scipy.stats import norm
 
 from app.services import monte_carlo as mc
-from app.services.monte_carlo import MonteCarloInputError
-from app.services.pipeline import StrategyParams, run_strategy, strategy_mc_returns
+from app.services.monte_carlo import MonteCarloInputError, strategy_returns
+from app.services.pipeline import StrategyParams, run_strategy
 
 BAND_KEYS = ("p5", "p25", "p50", "p75", "p95")
 MODELS = ("gbm", "bootstrap", "stationary")
@@ -131,7 +131,7 @@ def test_histogram_keeps_every_path_on_heavy_tailed_input() -> None:
     assert (pooled < res.hist_edges[0]).any() and (pooled > res.hist_edges[-1]).any()  # clipped, not dropped
 
 
-# ---------------------------------------------------------------- stationary bootstrap (Phase 7)
+# ---------------------------------------------------------------- stationary bootstrap
 
 
 def reference_stationary(
@@ -281,7 +281,7 @@ def test_invalid_histories_are_rejected(R: np.ndarray, block_len: int, message: 
 def test_a_strategy_window_without_exposure_is_rejected(prices: pd.DataFrame, varying_rf) -> None:
     rf = varying_rf(prices.index)
     never = StrategyParams(strategy="mean_reversion", tickers=("Y",), L=20, z_entry=5.0)  # |z| <= 4.25
-    R, exposed = strategy_mc_returns(run_strategy(prices, rf, never), "full")
+    R, exposed = strategy_returns(run_strategy(prices, rf, never), "full")
     assert not exposed
     assert np.log1p(R).std(ddof=1) > 1e-5  # cash alone varies with the T-bill rate, far above the floor
     with pytest.raises(MonteCarloInputError, match="no position"):
@@ -291,8 +291,8 @@ def test_a_strategy_window_without_exposure_is_rejected(prices: pd.DataFrame, va
 def test_strategy_windows_feed_the_simulation(prices: pd.DataFrame, rf: pd.Series) -> None:
     run = run_strategy(prices, rf, StrategyParams(strategy="pairs", tickers=("Y", "X"), L=60))
     bt = run.backtest
-    full, exposed_full = strategy_mc_returns(run, "full")
-    is_, exposed_is = strategy_mc_returns(run, "is")
+    full, exposed_full = strategy_returns(run, "full")
+    is_, exposed_is = strategy_returns(run, "is")
     assert exposed_full and exposed_is
     assert len(full) == bt.stop - bt.e and len(is_) == bt.split_pos - bt.e
     assert np.array_equal(full, bt.total.iloc[bt.e : bt.stop].to_numpy())

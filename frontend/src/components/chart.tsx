@@ -7,7 +7,7 @@ import { fmtMoney, fmtMonth, fmtMultiple, fmtNum, fmtPct } from '../format'
 import { AXIS_TICK, COLORS, TOOLTIP_STYLE } from '../theme'
 
 /** The value axis' width. The same on every synchronized chart, so their x positions line up. */
-export const Y_WIDTH = 64
+const Y_WIDTH = 64
 
 export const asNumber = (value: unknown) => (typeof value === 'number' ? value : null)
 export const moneyTip = (value: unknown) => fmtMoney(asNumber(value))

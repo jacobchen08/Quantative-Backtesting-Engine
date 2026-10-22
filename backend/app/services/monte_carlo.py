@@ -1,4 +1,5 @@
-"""GBM, circular block bootstrap, stationary bootstrap and closed-form VaR/CVaR (§10). Pure (§0, rule 8).
+"""GBM, circular block bootstrap, stationary bootstrap and closed-form VaR/CVaR (§10), and the
+daily returns they are fitted to (§10.1). Pure (§0, rule 8).
 
 Inputs are daily simple returns R as decimals, and one simulation step is one trading day.
 A path array P holds cumulative log returns, P[t, j] for t = 0..T with P[0] = 0, so the
@@ -17,11 +18,16 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from arch.bootstrap import optimal_block_length
 from scipy.stats import norm
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from app.services.pipeline import StrategyRun
 
 MIN_HIST = 252
 MAX_BLOCK_LEN = 63  # the API's block_len range is 1..63 (§11.2); "auto" is clipped to it too
@@ -38,6 +44,32 @@ ALPHAS = (0.95, 0.99)
 
 class MonteCarloInputError(Exception):
     """The return series can't be simulated (§10.1). The API maps it to HTTP 422."""
+
+
+def strategy_returns(run: StrategyRun, window: Literal["full", "is"]) -> tuple[np.ndarray, bool]:
+    """Daily total returns of the evaluation window ("full") or its IS part ("is").
+
+    Returns:
+        (returns, has_exposure), where has_exposure says whether the strategy held a position
+        on any day of the window.
+
+    Raises:
+        MonteCarloInputError: the window contains the ruin day, where ln(1 + R) is undefined.
+    """
+    bt = run.backtest
+    end = bt.stop if window == "full" else min(bt.split_pos, bt.stop)
+    if bt.ruined and bt.stop <= end:  # the ruin day stop - 1 is inside [e, end)
+        label = "evaluation" if window == "full" else "in-sample"
+        raise MonteCarloInputError(
+            f"The {label} window contains the ruin day {bt.ruin_date:%Y-%m-%d}, where ln(1 + R) is undefined."
+        )
+    sl = slice(bt.e, end)
+    return bt.total.iloc[sl].to_numpy(), bool(bt.held.iloc[sl].any())
+
+
+def ticker_returns(close: pd.Series) -> np.ndarray:
+    """Daily simple returns C_t / C_{t-1} - 1 of one adjusted close, without the leading NaN."""
+    return (close / close.shift(1) - 1).iloc[1:].to_numpy()
 
 
 def validate_returns(R: object, *, block_len: int | Literal["auto"], has_exposure: bool = True) -> np.ndarray:

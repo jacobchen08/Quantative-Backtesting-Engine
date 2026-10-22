@@ -6,7 +6,7 @@
 //   backend/scripts/seed_e2e.py fills with the synthetic market (2012-01-03 to 2019-12-31), so every
 //   price read is a cache hit and a miss is a 503, never a download;
 // - `vite preview` on :4173, serving a fresh build in dist-e2e/ that calls the API on :8001;
-// - `vite preview` on :4174, serving the static demo's build (Phase 9) from dist-demo/.
+// - `vite preview` on :4174, serving the static demo's build from dist-demo/.
 import { defineConfig, devices } from '@playwright/test'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -60,10 +60,10 @@ export default defineConfig({
       timeout: 180_000,
     },
     {
-      // The static demo (Phase 9, e2e/demo.spec.ts): its build in dist-demo/, served under its GitHub
+      // The static demo (e2e/demo.spec.ts): its build in dist-demo/, served under its GitHub
       // Pages path. It replays public/demo/ and calls no API. (The build above already typechecks.)
       command: `npx vite build --mode demo --outDir dist-demo --emptyOutDir && npx vite preview --mode demo --outDir dist-demo --port ${DEMO_PORT} --strictPort`,
-      url: `http://localhost:${DEMO_PORT}/Quantative-Backtesting-Engine/`,
+      url: `http://localhost:${DEMO_PORT}/Quantitative-Backtesting-Engine/`,
       reuseExistingServer: false,
       timeout: 180_000,
     },

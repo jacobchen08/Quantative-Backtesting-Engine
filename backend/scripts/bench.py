@@ -57,7 +57,8 @@ from app.main import app, diagnostics_cache
 from app.schemas import BacktestRequest, BacktestResponse, WalkForwardRequest
 from app.serialization import backtest_payload
 from app.services import data_loader, monte_carlo, pipeline, stats
-from app.services.pipeline import BacktestReport
+from app.services.report import BacktestReport, build_report
+from app.services.walk_forward import run_walk_forward
 
 BENCH_DB = BACKEND / "bench.db"
 PAIR = ["KO", "PEP"]
@@ -289,7 +290,7 @@ def stage_breakdown(factory: sessionmaker[Session], repeats: int) -> tuple[dict[
         t_miss, diagnostics = timed(stats.pairs_diagnostics, y, x, run.split_date)
         warm.get(y, x, run.split_date)
         t_hit, _ = timed(warm.get, y, x, run.split_date)
-        t_report, report = timed(pipeline.build_report, run, pairs_diagnostics=constant(diagnostics))
+        t_report, report = timed(build_report, run, pairs_diagnostics=constant(diagnostics))
         t_serialize, _ = timed(serialize, report, resolved, market.warnings)
         if i > 0:
             for name, value in zip(names, (t_load, t_run, t_miss, t_hit, t_report, t_serialize), strict=True):
@@ -318,7 +319,7 @@ def parameter_iteration(
 
 
 def walk_forward_alone(factory: sessionmaker[Session], repeats: int) -> tuple[list[float], dict[str, int]]:
-    """pipeline.run_walk_forward on the loaded 15-year data, without loading or serialization.
+    """walk_forward.run_walk_forward on the loaded 15-year data, without loading or serialization.
 
     Returns the times and the shape of one result: folds, configurations and distinct choices.
     """
@@ -328,8 +329,8 @@ def walk_forward_alone(factory: sessionmaker[Session], repeats: int) -> tuple[li
             session, request.tickers, request.start, request.end, request.risk_free
         )
     params = request.to_params()
-    times = repeat(lambda: pipeline.run_walk_forward(market.prices, market.rf, params), repeats)
-    result = pipeline.run_walk_forward(market.prices, market.rf, params)
+    times = repeat(lambda: run_walk_forward(market.prices, market.rf, params), repeats)
+    result = run_walk_forward(market.prices, market.rf, params)
     shape = {
         "folds": len(result.folds),
         "configs": result.n_configs,
@@ -362,7 +363,7 @@ def monte_carlo_peak_mb(factory: sessionmaker[Session]) -> float:
             session, request.tickers, request.start, request.end, request.risk_free
         )
     run = pipeline.run_strategy(market.prices, market.rf, request.to_params())
-    returns, exposed = pipeline.strategy_mc_returns(run, "full")
+    returns, exposed = monte_carlo.strategy_returns(run, "full")
     gc.collect()
     tracemalloc.start()
     try:

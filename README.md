@@ -1,25 +1,23 @@
 # Quantitative Backtesting Engine
 
-A backtesting and Monte Carlo risk engine for daily US equity strategies, with a React dashboard. It runs four strategies:
-- single-asset mean reversion;
-- pairs trading, with a rolling-OLS or Kalman-filter hedge ratio;
-- time-series momentum (trend following) on one asset;
-- a multi-asset trend portfolio of 2–12 ETFs, each leg sized to the same volatility.
+I built this to test daily trading strategies on US stocks and ETFs the way I'd want someone else's results tested: with realistic costs, a clean split between the data a strategy was tuned on and the data that judges it, and a few tools that try to talk you out of a good-looking result. A FastAPI backend does the math and a React dashboard shows it.
 
-Each can take a volatility-targeting overlay (the portfolio always has one), and all but pairs have a long-only switch. Results come split in-sample and out-of-sample, with conservative accounting: a one-day execution lag by default, per-leg trading costs, an optional borrow fee on shorts, and cash at the T-bill rate.
+There are four strategies: mean reversion on a single stock, pairs trading (with either a rolling regression or a Kalman filter for the hedge ratio), trend following on one asset, and a trend portfolio of 2 to 12 ETFs, each sized to the same volatility. Any of them can be sized to a volatility target, and all but pairs can be run long-only. The accounting is deliberately conservative: trades fill a day after the signal by default, every leg pays a trading cost, shorts can pay a borrow fee, and idle cash earns the T-bill rate. Results are reported in-sample and out-of-sample.
 
-Several tools test how much a result can be trusted:
-- a cost sweep with the break-even cost;
-- rolling one-year Sharpe and beta, and calendar returns;
-- a parameter grid with the deflated Sharpe ratio, which discounts the best cell for the number of cells tried;
-- a walk-forward analysis, which re-chooses the grid's best configuration on each training window and trades it on the next test window, giving a track record that is out-of-sample throughout;
-- Monte Carlo projections with GBM, a circular block bootstrap and a stationary bootstrap, with an optional data-driven block length, checked against closed-form VaR and CVaR.
+Most of the project is about whether a result deserves to be trusted:
+- a **cost sweep** that shows the Sharpe ratio at every trading cost and the cost at which the edge disappears;
+- rolling one-year Sharpe and beta, and monthly and yearly returns;
+- a **parameter grid** with the deflated Sharpe ratio, which marks down the best cell for the number of cells tried;
+- a **walk-forward analysis**, which re-picks the best settings on each training window and trades them on the next, so the whole track record is out-of-sample;
+- **Monte Carlo** projections from three models (GBM and two bootstraps of the real returns), checked against closed-form VaR and CVaR.
 
-The dashboard keeps a history of every backtest, with side-by-side comparison and "Load settings". Its settings live in the URL, so a link reproduces a run, and its trades, daily series and calendar returns export as CSV. Browser tests drive it in Chromium against an offline API.
+The dashboard also keeps a history of past runs you can compare side by side, puts its settings in the URL so a link reproduces a run, and exports trades and series as CSV.
 
-- **Specification:** [CLAUDE.md](CLAUDE.md), the source of truth for every formula and rule.
-- **Methodology:** [docs/METHODOLOGY.md](docs/METHODOLOGY.md) justifies each formula, lists the limitations, and records every approved deviation from the specification.
-- **Status:** Phases 0–9 are done: the engine, the API, the dashboard, the documentation and the benchmarks, then costs and robustness metrics, walk-forward analysis, the Kalman pairs model, the trend portfolio and the stationary bootstrap, run history, URL state, CSV export, the log scale, offline mode and browser tests, and a [static demo](#static-demo). The demo is built and tested but not deployed yet.
+**Built with** Python (FastAPI, NumPy, pandas, SciPy, statsmodels, SQLAlchemy, SQLite), React and TypeScript (Vite, Tailwind CSS, Recharts), and pytest, Vitest, Playwright and GitHub Actions for testing.
+
+**Where to read more.** If you're new to the code, start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): it follows a request from the Run button through the engine and back, and explains the vocabulary. [CLAUDE.md](CLAUDE.md) is the specification the code is built against; every formula and rule is defined there, and the § numbers in code comments point into it. [docs/METHODOLOGY.md](docs/METHODOLOGY.md) explains why each formula is the way it is, lists the model's limitations, and records every place the code departs from the spec.
+
+All nine planned phases are finished, including the [static demo](#static-demo), which is built and tested but not deployed yet.
 
 ![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
 
@@ -27,7 +25,7 @@ The dashboard keeps a history of every backtest, with side-by-side comparison an
 
 ## Setup (PowerShell)
 
-Requires Python 3.12+ and Node 24+.
+You need Python 3.12 or later and Node 24 or later.
 
 ```powershell
 Copy-Item .env.example .env
@@ -52,24 +50,24 @@ cd frontend
 npm run dev
 ```
 
-Prices are downloaded from Yahoo Finance on first use and cached in `backend\quant.db`. With `QUANT_OFFLINE=1` set (in `.env` or the shell) the API never downloads: a ticker or date range that isn't cached returns 503.
+Prices come from Yahoo Finance the first time a ticker is used, and are cached in `backend\quant.db` after that. Set `QUANT_OFFLINE=1` (in `.env` or the shell) to stop the API downloading anything; a ticker or date range that isn't cached then returns a 503.
 
-The sidebar's settings are written to the URL when you press Run, so the link reproduces the run; opening a link fills the sidebar and sends nothing until you press Run. **Run history**, at the bottom of the page, lists every stored backtest. "Load settings" puts a run's settings back in the sidebar, and ticking up to four runs compares their metrics.
+Pressing Run writes the sidebar's settings into the URL, so you can share or bookmark a run. Opening such a link fills in the sidebar but doesn't send anything until you press Run. The **Run history** panel at the bottom of the page lists every stored backtest: "Load settings" puts a run's settings back in the sidebar, and ticking up to four runs compares their metrics.
 
 ## Static demo
 
-A read-only build of the dashboard for GitHub Pages, which replays recorded API responses and needs no backend. It has eight scenarios: pairs on KO/PEP, XOM/CVX, GOOGL/GOOG and NVDA/AMD, mean reversion on KO, SPY trend with the volatility target off and on, and the trend portfolio of SPY, QQQ, GLD and TLT. Each runs 2015-01-01 to 2025-12-31 with the default settings, and includes its sensitivity grid, walk-forward and Monte Carlo (seed 42). The sidebar is read-only apart from a scenario picker. How the replay works is in METHODOLOGY [§33](docs/METHODOLOGY.md).
+The demo is a read-only build of the dashboard for GitHub Pages. It replays recorded API responses, so it needs no backend. There are eight scenarios: pairs on KO/PEP, XOM/CVX, GOOGL/GOOG and NVDA/AMD, mean reversion on KO, SPY trend with and without the volatility target, and a trend portfolio of SPY, QQQ, GLD and TLT. Each covers 2015-01-01 to 2025-12-31 with the default settings, and includes its sensitivity grid, walk-forward and Monte Carlo (seed 42). The only control you can change is the scenario picker. METHODOLOGY [§33](docs/METHODOLOGY.md) explains how the replay works.
 
-**Not deployed yet.** The recorded series are derived from Yahoo Finance data, and publishing them waits on a decision about redistributing that data (CLAUDE.md §13). Until then `.github/workflows/pages.yml` builds the demo on every push to `main` but doesn't deploy it. Once deployed it will be at https://jacobchen08.github.io/Quantative-Backtesting-Engine/.
+It isn't deployed yet. The recorded series are derived from Yahoo Finance data, and I haven't decided whether redistributing them is acceptable (CLAUDE.md §13). Until then `.github/workflows/pages.yml` builds the demo on every push to `main` but skips the deploy. Once it's live it will be at https://jacobchen08.github.io/Quantitative-Backtesting-Engine/.
 
-The current recording, in `frontend\public\demo`, was made on 2026-10-20 from data through 2025-12-31: 33 files, 8.65 MB, against a 10 MB limit.
+The current recording in `frontend\public\demo` was made on 2026-10-20 from data through 2025-12-31. It is 33 files and 8.65 MB, under the 10 MB limit.
 
 ```powershell
 # Re-record. Downloads any prices missing from backend\quant.db first; adds nothing to the run history.
 cd backend
 .venv\Scripts\python.exe scripts\record_demo.py
 
-# Build the demo and serve it at http://localhost:4173/Quantative-Backtesting-Engine/
+# Build the demo and serve it at http://localhost:4173/Quantitative-Backtesting-Engine/
 cd ..\frontend
 npm run build:demo
 npm run preview:demo
@@ -89,7 +87,7 @@ npm test
 npm run build
 ```
 
-The backend tests use synthetic data and a fake network, so they never reach Yahoo. They run in parallel, one worker per core (pytest-xdist); add `-n 0` to run them in one process.
+The backend tests run on synthetic data with a fake network, so they never touch Yahoo. pytest-xdist runs them in parallel, one worker per core; add `-n 0` to run them in a single process.
 
 ### Browser tests
 
@@ -99,20 +97,20 @@ npx playwright install chromium   # once
 npx playwright test
 ```
 
-Playwright starts its own three servers and stops them afterwards: the API on port 8001, offline, on a temporary database that `backend\scripts\seed_e2e.py` fills with the synthetic market (tickers SYNY, SYNX, SYNT and SPY, 2012–2019); a fresh production build on port 4173; and a fresh build of the [static demo](#static-demo) on port 4174. Nothing reaches the network, and dev servers on 8000 and 5173 are left alone. The 14 tests took 69.7 s here (`npx playwright test` in PowerShell on 2026-10-20, including both builds). CI runs them on Ubuntu.
+Playwright starts three servers of its own and shuts them down afterwards. The first is the API on port 8001, offline, on a temporary database that `backend\scripts\seed_e2e.py` fills with the synthetic market (tickers SYNY, SYNX, SYNT and SPY, 2012–2019). The second is a fresh production build on port 4173, and the third a fresh build of the [static demo](#static-demo) on port 4174. Nothing goes to the network, and any dev servers you have on 8000 and 5173 are left alone. The 14 tests took 69.7 s on my machine (`npx playwright test` in PowerShell on 2026-10-20, including both builds). CI runs them on Ubuntu.
 
 ## Benchmarks
 
-Every runtime figure in this repository comes from `scripts/bench.py`:
+Every timing here comes from `scripts/bench.py`, apart from the paired comparison in the speed-ups table below:
 
 ```powershell
 cd backend
 .venv\Scripts\python.exe scripts\bench.py
 ```
 
-The bench keeps its own price cache, `backend\bench.db`, so it never touches the app's database or run history. Its first run downloads the data, and every timed request after that is served from the cache. Requests go through FastAPI's TestClient in process, so the times include validation, the engine, storing the run and JSON encoding, but no network or browser.
+The bench has its own price cache, `backend\bench.db`, so it never touches the app's database or run history. The first run downloads the data; after that every timed request is served from the cache. Requests go through FastAPI's TestClient in the same process, so the times include validation, the engine, storing the run and JSON encoding, but no network or browser.
 
-The tables below are copied from its output on 2026-10-20, after the performance refactor, with no other workload running:
+These tables are copied from its output on 2026-10-21, after the second refactor, with nothing else running:
 
 - CPU: AMD Ryzen 7 PRO 8840HS w/ Radeon 780M Graphics, 16 logical cores; RAM: 59.7 GiB
 - OS: Windows-11-10.0.26220-SP0; Python 3.14.6 (CPython)
@@ -124,104 +122,108 @@ The tables below are copied from its output on 2026-10-20, after the performance
 
 | Workload | Median | Min | Max | Target | Met |
 |---|---:|---:|---:|---:|---:|
-| 15-year pairs backtest, first request on the data (diagnostics computed) | 299 ms | 270 ms | 327 ms | < 300 ms | yes |
-| 15-year pairs backtest, z_entry changed (diagnostics cached) | 134 ms | 129 ms | 177 ms | < 300 ms | yes |
-| Default sensitivity grid (20 configurations) | 423 ms | 340 ms | 456 ms | < 5 s | yes |
-| Default walk-forward, 15-year pairs (20 configurations) | 385 ms | 373 ms | 423 ms | < 8 s | yes |
-| Default Monte Carlo, 10,000 x 252: GBM and block bootstrap (their elapsed_ms) | 147 ms | 137 ms | 173 ms | < 1 s | yes |
-| Default Monte Carlo, three models: the request | 384 ms | 362 ms | 420 ms | < 1.5 s | yes |
-| Default Monte Carlo, three models: the simulation alone (elapsed_ms_total) | 294 ms | 268 ms | 320 ms | < 1.5 s | yes |
-| 15-year Kalman pairs backtest, first request on the data (diagnostics computed) | 256 ms | 251 ms | 268 ms | < 500 ms | yes |
+| 15-year pairs backtest, first request on the data (diagnostics computed) | 290 ms | 249 ms | 323 ms | < 300 ms | yes |
+| 15-year pairs backtest, z_entry changed (diagnostics cached) | 121 ms | 109 ms | 167 ms | < 300 ms | yes |
+| Default sensitivity grid (20 configurations) | 221 ms | 181 ms | 264 ms | < 5 s | yes |
+| Default walk-forward, 15-year pairs (20 configurations) | 232 ms | 205 ms | 286 ms | < 8 s | yes |
+| Default Monte Carlo, 10,000 x 252: GBM and block bootstrap (their elapsed_ms) | 139 ms | 128 ms | 147 ms | < 1 s | yes |
+| Default Monte Carlo, three models: the request | 347 ms | 335 ms | 388 ms | < 1.5 s | yes |
+| Default Monte Carlo, three models: the simulation alone (elapsed_ms_total) | 279 ms | 264 ms | 308 ms | < 1.5 s | yes |
+| 15-year Kalman pairs backtest, first request on the data (diagnostics computed) | 243 ms | 237 ms | 267 ms | < 500 ms | yes |
 
 **Pairs backtest by stage (first request on the data)**
 
 | Stage | Median | Min | Max |
 |---|---:|---:|---:|
-| Load prices and rf from the cache | 59.8 ms | 51.5 ms | 78.2 ms |
-| run_strategy (section 5.0, steps 1-6) | 23.4 ms | 20.2 ms | 32.7 ms |
-| Diagnostics: two Engle-Granger tests, static OLS, half-life | 137 ms | 114 ms | 149 ms |
-| Report: metrics, benchmark, trades, warnings, series | 37.6 ms | 30.9 ms | 43.2 ms |
-| Serialization: payload, response model, JSON | 17.1 ms | 15.8 ms | 27.1 ms |
-| Sum of the stages | 281 ms | 234 ms | 310 ms |
-| Diagnostics from the cache instead (key and lookup) | 0.17 ms | 0.14 ms | 0.23 ms |
+| Load prices and rf from the cache | 53.3 ms | 35.5 ms | 71.6 ms |
+| run_strategy (section 5.0, steps 1-6) | 21.3 ms | 16.3 ms | 26.4 ms |
+| Diagnostics: two Engle-Granger tests, static OLS, half-life | 154 ms | 123 ms | 164 ms |
+| Report: metrics, benchmark, trades, warnings, series | 43.2 ms | 36.7 ms | 57.9 ms |
+| Serialization: payload, response model, JSON | 21.3 ms | 16.8 ms | 36.6 ms |
+| Sum of the stages | 291 ms | 261 ms | 308 ms |
+| Diagnostics from the cache instead (key and lookup) | 0.19 ms | 0.14 ms | 0.22 ms |
 
-The whole request took 299 ms (median). The rest is parsing and validating the request, storing the run, FastAPI's own response handling and the TestClient round trip.
+The whole request took 290 ms (median). The difference from the sum of the stages is request parsing and validation, storing the run, FastAPI's own response handling and the TestClient round trip.
 
 **Parameter iteration: each request changes one field of the one before**
 
 | Field changed | Median | Min | Max | Diagnostics cache |
 |---|---:|---:|---:|---:|
-| z_entry (1.55, 1.60, ...) | 134 ms | 129 ms | 177 ms | 10 hits, 0 misses |
-| L (24, 28, ...), default 70% split | 315 ms | 296 ms | 368 ms | 0 hits, 10 misses |
-| L (24, 28, ...), split_date fixed | 169 ms | 150 ms | 216 ms | 10 hits, 0 misses |
+| z_entry (1.55, 1.60, ...) | 121 ms | 109 ms | 167 ms | 10 hits, 0 misses |
+| L (24, 28, ...), default 70% split | 277 ms | 253 ms | 347 ms | 0 hits, 10 misses |
+| L (24, 28, ...), split_date fixed | 140 ms | 133 ms | 168 ms | 10 hits, 0 misses |
 
 **Walk-forward (default: 756 training and 63 test days, rolling)**
 
 | Stage | Median | Min | Max |
 |---|---:|---:|---:|
-| The request (as in the first table) | 385 ms | 373 ms | 423 ms |
-| run_walk_forward alone (no loading or serialization) | 330 ms | 318 ms | 369 ms |
+| The request (as in the first table) | 232 ms | 205 ms | 286 ms |
+| run_walk_forward alone (no loading or serialization) | 157 ms | 152 ms | 189 ms |
 
-It backtests 20 grid configurations plus the request's own, then makes 46 folds: 2,897 out-of-sample days, on which 15 distinct configurations were chosen.
+That's 20 grid configurations plus the request's own, cut into 46 folds: 2,897 out-of-sample days, with 15 different configurations chosen along the way.
 
 **Kalman pairs and the trend portfolio**
 
 | Workload | Median | Min | Max |
 |---|---:|---:|---:|
-| run_strategy, rolling OLS (the default pairs model) | 20.0 ms | 19.3 ms | 25.4 ms |
-| run_strategy, Kalman filter (delta 1e-6) | 31.6 ms | 23.2 ms | 34.5 ms |
-| Trend portfolio of 10 ETFs: the request | 366 ms | 341 ms | 516 ms |
-| Trend portfolio of 10 ETFs: run_strategy alone | 83.4 ms | 68.8 ms | 90.1 ms |
+| run_strategy, rolling OLS (the default pairs model) | 14.7 ms | 14.3 ms | 18.5 ms |
+| run_strategy, Kalman filter (delta 1e-6) | 26.9 ms | 17.3 ms | 30.7 ms |
+| Trend portfolio of 10 ETFs: the request | 306 ms | 269 ms | 422 ms |
+| Trend portfolio of 10 ETFs: run_strategy alone | 55.6 ms | 48.8 ms | 69.5 ms |
 
-The trend portfolio (SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC, VNQ; L = 252, a 40% target per asset) runs on the intersection of their calendars: 3,520 series days from 2012-01-03, 219 leg trades.
+The trend portfolio holds SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, DBC and VNQ, with L = 252 and a 40% volatility target per asset. It runs on the days all ten traded: 3,520 days from 2012-01-03, with 219 trades across the legs.
 
 **Monte Carlo**
 
 | Model (time inside the default request) | Median | Min | Max |
 |---|---:|---:|---:|
-| GBM | 80.9 ms | 73.1 ms | 93.3 ms |
-| Circular block bootstrap (block length 10) | 64.9 ms | 57.6 ms | 79.8 ms |
-| Stationary bootstrap (mean block length 10) | 141 ms | 130 ms | 166 ms |
-| The request with block_len "auto" | 378 ms | 350 ms | 405 ms |
-| The simulation alone with block_len "auto" (elapsed_ms_total) | 295 ms | 268 ms | 304 ms |
+| GBM | 78.9 ms | 71.6 ms | 81.2 ms |
+| Circular block bootstrap (block length 10) | 60.1 ms | 56.1 ms | 70.5 ms |
+| Stationary bootstrap (mean block length 10) | 138 ms | 127 ms | 167 ms |
+| The request with block_len "auto" | 348 ms | 329 ms | 374 ms |
+| The simulation alone with block_len "auto" (elapsed_ms_total) | 283 ms | 267 ms | 306 ms |
 
 With block_len "auto" the block lengths were 2 (circular) and 2 (stationary).
 
-Peak traced memory at the API caps (50,000 paths x 253 days, three models): 216 MB, 2.13x the 102 MB path array (tracemalloc, which sees numpy's buffers).
+At the API's limits (50,000 paths x 253 days, three models), peak memory was 216 MB, 2.13 times the 102 MB path array (measured with tracemalloc, which sees NumPy's buffers).
 
-**Before and after the performance refactor** (medians from two bench runs on 2026-10-20, same machine; every API response is byte-identical between the two versions apart from the Monte Carlo's timings)
+### Two rounds of speed-ups
 
-| Workload | Before | After |
-|---|---:|---:|
-| 15-year pairs backtest, first request on the data | 414 ms | 299 ms |
-| Two Engle–Granger tests (the diagnostics stage) | 201 ms | 137 ms |
-| Serialization stage | 51.9 ms | 17.1 ms |
-| Default sensitivity grid | 689 ms | 423 ms |
-| Default walk-forward | 728 ms | 385 ms |
-| Default Monte Carlo, three models: the request | 682 ms | 384 ms |
-| Trend portfolio of 10 ETFs: run_strategy alone | 139 ms | 83.4 ms |
+I went through the code twice looking for speed, on 2026-10-20 and 2026-10-21. Both times every API response stayed byte-identical on 27 requests covering every strategy and option, apart from the Monte Carlo's wall-clock timings (METHODOLOGY §20).
 
-The changes, each checked to leave every output bit-identical (METHODOLOGY §20):
-- OpenBLAS runs on one thread. The two Engle–Granger tests fit 53 least-squares regressions of about 2,600 rows and up to 28 columns, and at that size OpenBLAS's threads cost more than they save: one thread nearly halves the tests' time.
-- The sensitivity grid and the walk-forward skip the trade bookkeeping of their 20 backtests; they only read the daily returns.
-- The entry and exit rule, the trend portfolio's sizing and the JSON conversion of the chart series work on whole arrays instead of element by element or leg by leg. The stationary bootstrap finds where each block began with a loop of whole-row maxima, about 20 times faster than NumPy's accumulate down the columns.
-- The Monte Carlo bands (five quantiles of 10,000 paths on each of 253 days) are computed in four blocks of days at once; NumPy releases the interpreter lock while it partitions.
+| Workload | Before the first | After the first | After the second |
+|---|---:|---:|---:|
+| 15-year pairs backtest, first request on the data | 414 ms | 299 ms | 0.93x of that |
+| 15-year pairs backtest, z_entry changed | n/a | 134 ms | 0.85x |
+| Default sensitivity grid | 689 ms | 423 ms | 0.49x |
+| Default walk-forward | 728 ms | 385 ms | 0.51x |
+| Trend portfolio of 10 ETFs: the request | n/a | 366 ms | 0.77x |
+| Default Monte Carlo, three models: the request | 682 ms | 384 ms | 0.94x |
 
-**What the numbers mean**
+The first two columns are bench medians from a single day. The last column had to be measured differently: on 2026-10-21 this laptop's speed drifted by as much as 2x between bench runs, which swamped the differences I was trying to measure. So I alternated the old and new code in eight back-to-back rounds of the same workloads, through the same TestClient on a copy of bench.db, and took the median of the eight per-round ratios. The grid's ratio ranged from 0.47 to 0.53.
 
-- **The first request on new data now meets the 300 ms target, narrowly**: 299 ms median, with runs from 270 to 327 ms. The two Engle–Granger cointegration tests are still almost half of it (137 ms).
-- **The API caches those tests,** because they depend only on the two price series and the split date (METHODOLOGY §20). Changing z_entry, z_exit, costs or the hedge mode reuses them, and the backtest takes 134 ms.
-- **Changing L recomputes them under the default split,** because a new lookback moves the default 70% split date. With `split_date` set, L changes hit the cache too (169 ms).
-- **A first Kalman request is no slower than a first rolling-OLS request** (256 ms and 299 ms): both run the same Engle–Granger tests, and the gap between the medians is run-to-run variation. Inside `run_strategy` the filter takes 31.6 ms against 20.0 ms for rolling OLS.
-- **Runs vary.** Before the refactor, the Phase 7 run on 2026-10-19 measured the first pairs request at 351 ms, and the run on 2026-10-20 at 414 ms, on the same machine. The before and after figures above come from the same day.
-- **The stationary bootstrap is still the slowest model,** at 141 ms against 65 ms for the block bootstrap: it draws a restart flag and a start for every day of every path (METHODOLOGY §29).
-- **Memory is unchanged** at 216 MB: the peak comes from the block bootstrap, and the stationary bootstrap builds its paths in chunks of 2,048.
-- **A 10-ETF trend portfolio takes 366 ms,** with 83 ms in `run_strategy`: ten legs' forecasts, signals and sizing, and per-leg trades.
-- **The sensitivity grid and the walk-forward** are well inside their targets, at 423 ms against 5 s and 385 ms against 8 s.
+The second round changed five things:
+- The daily return arithmetic of §6.1 (held weights, P&L, borrow, turnover, cost) now runs on plain NumPy arrays. It gives exactly the same floats as the pandas version, about 15 times faster, and the grids run it 21 times per request.
+- The grids compute each lookback's score once. A configuration's score and volatility forecast depend on L but not on z_entry, so the 20-cell pairs grid now computes 5 scores instead of 20. A test checks that no cell changes.
+- Trades are numbered only when they are going to be recorded. The grids never record them, and the days a position is held now come straight from the positions.
+- The trend portfolio's trades go into one table instead of one per leg.
+- Price reads parse the stored dates in one call instead of building a Python date per row.
+
+### Reading the numbers
+
+The first request on new data meets the 300 ms target, but only just: 290 ms median in the run above. About half of that is the two Engle–Granger cointegration tests. I kept statsmodels' `coint` for them, as §5.4 requires, rather than write a faster version that might not match it to the last digit.
+
+Those tests depend only on the two price series and the split date, so the API caches them (METHODOLOGY §20). Changing z_entry, z_exit, costs or the hedge mode reuses the cached result, and the backtest drops to 121 ms. Changing L doesn't, under the default split, because a new lookback moves the default 70% split date. With `split_date` set explicitly, L changes hit the cache too (140 ms).
+
+Timings on this machine vary by up to 2x over an evening, so only compare figures from the same run. Each row shows its own min-to-max spread.
+
+The stationary bootstrap is the slowest Monte Carlo model, at 138 ms against 60 ms for the block bootstrap, because it draws a restart flag and a starting point for every day of every path (METHODOLOGY §29). Its random draws determine the seeded results, so I left it as it is. Memory hasn't changed at 216 MB: the peak comes from the block bootstrap, and the stationary bootstrap builds its paths in chunks of 2,048.
+
+The sensitivity grid and the walk-forward are well inside their targets, at 221 ms against 5 s and 232 ms against 8 s.
 
 ## Screenshots
 
-All taken on 2026-10-19 from the dashboard running against the local API, on Yahoo data, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173 running, that script regenerates every file in `docs\screenshots`; it downloads any data the cache lacks. The KO/PEP section views show the in-sample segment, where the cost sweep has a break-even line. The walk-forward view has the buy & hold line hidden with its toggle, so the axis fits the two pairs strategies.
+All of these were taken on 2026-10-19 from the dashboard running against the local API on Yahoo data, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173, that script regenerates every file in `docs\screenshots`, downloading any data the cache lacks. The KO/PEP views show the in-sample segment, because that's where the cost sweep has a break-even line. In the walk-forward view I hid the buy & hold line with its toggle, so the axis fits the two pairs strategies.
 
 | | |
 |---|---|

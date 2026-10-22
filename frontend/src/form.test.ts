@@ -57,7 +57,7 @@ describe('defaults', () => {
     expect(withStrategy(back, 'trend_portfolio').L).toBe('252')
   })
 
-  it('defaults the Phase 7 settings: rolling OLS, δ = 1e-6, the four trend ETFs at 40% each, a fixed block length', () => {
+  it('defaults the pairs model, portfolio and block-length settings: rolling OLS, δ = 1e-6, the four trend ETFs at 40% each, a fixed block length', () => {
     const f = defaultForm(TODAY)
     expect([f.pairsModel, f.kalmanDelta]).toEqual(['ols', '1e-6'])
     expect(parseTickerList(f.portfolioTickers)).toEqual(['SPY', 'QQQ', 'GLD', 'TLT'])

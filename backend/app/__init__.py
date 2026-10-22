@@ -1,4 +1,4 @@
-"""Quant Engine backend."""
+"""Quantitative Backtesting Engine: the backend (API and engine)."""
 
 import os
 
