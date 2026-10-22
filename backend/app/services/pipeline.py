@@ -48,7 +48,7 @@ class StrategyParams:
     hedge_mode: Literal["fixed_at_entry", "rolling"] = "fixed_at_entry"
     pairs_model: Literal["ols", "kalman"] = "ols"
     kalman_delta: float = 1e-6
-    cost_bps: float = 10.0
+    cost_bps: float = 2.0
     execution_lag: int = 1
     borrow_bps: float = 0.0
     allow_short: bool = True

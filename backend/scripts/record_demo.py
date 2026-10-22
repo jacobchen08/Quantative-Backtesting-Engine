@@ -56,7 +56,7 @@ MC_SEED = 42
 COMMON: dict[str, Any] = {
     "start": START,
     "end": END,
-    "cost_bps": 10,
+    "cost_bps": 2,
     "borrow_bps": 0,
     "execution_lag": 1,
     "risk_free": "tbill",

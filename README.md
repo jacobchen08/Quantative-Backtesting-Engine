@@ -21,7 +21,7 @@ All nine planned phases are finished, including the [static demo](#static-demo),
 
 ![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
 
-*KO/PEP pairs, 2015-01-02 to 2025-12-31, default settings. More views [below](#screenshots).*
+*KO/PEP pairs, 2015-01-02 to 2025-12-31, default settings with a 10 bps cost (the default then; it's now 2 bps). More views [below](#screenshots).*
 
 ## Setup (PowerShell)
 
@@ -60,7 +60,7 @@ The demo is a read-only build of the dashboard for GitHub Pages. It replays reco
 
 It isn't deployed yet. The recorded series are derived from Yahoo Finance data, and I haven't decided whether redistributing them is acceptable (CLAUDE.md §13). Until then `.github/workflows/pages.yml` builds the demo on every push to `main` but skips the deploy. Once it's live it will be at https://jacobchen08.github.io/Quantitative-Backtesting-Engine/.
 
-The current recording in `frontend\public\demo` was made on 2026-10-20 from data through 2025-12-31. It is 33 files and 8.65 MB, under the 10 MB limit.
+The current recording in `frontend\public\demo` was made on 2026-10-22 from data through 2025-12-31, at the 2 bps default cost. It is 33 files and 8.64 MB, under the 10 MB limit.
 
 ```powershell
 # Re-record. Downloads any prices missing from backend\quant.db first; adds nothing to the run history.
@@ -115,7 +115,7 @@ These tables are copied from its output on 2026-10-21, after the second refactor
 - CPU: AMD Ryzen 7 PRO 8840HS w/ Radeon 780M Graphics, 16 logical cores; RAM: 59.7 GiB
 - OS: Windows-11-10.0.26220-SP0; Python 3.14.6 (CPython)
 - Libraries: numpy 2.5.4, pandas 3.0.6, scipy 1.18.1, statsmodels 0.15.0, arch 8.0.0, fastapi 0.143.2, starlette 1.8.0, pydantic 2.14.1, SQLAlchemy 2.1.4
-- Data: KO/PEP pairs, every other setting default, 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db (no downloads)
+- Data: KO/PEP pairs, every other setting default (the cost was then 10 bps; it's now 2, which doesn't change the work done), 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db (no downloads)
 - Each row: 10 timed runs after one warm-up run, wall clock (time.perf_counter)
 
 **CLAUDE.md §14 targets**
@@ -223,7 +223,7 @@ The sensitivity grid and the walk-forward are well inside their targets, at 221 
 
 ## Screenshots
 
-All of these were taken on 2026-10-19 from the dashboard running against the local API on Yahoo data, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173, that script regenerates every file in `docs\screenshots`, downloading any data the cache lacks. The KO/PEP views show the in-sample segment, because that's where the cost sweep has a break-even line. In the walk-forward view I hid the buy & hold line with its toggle, so the axis fits the two pairs strategies.
+All of these were taken on 2026-10-19 from the dashboard running against the local API on Yahoo data, at the 10 bps cost that was then the default, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173, that script regenerates every file in `docs\screenshots`, downloading any data the cache lacks. The KO/PEP views show the in-sample segment, because that's where the cost sweep has a break-even line. In the walk-forward view I hid the buy & hold line with its toggle, so the axis fits the two pairs strategies.
 
 | | |
 |---|---|

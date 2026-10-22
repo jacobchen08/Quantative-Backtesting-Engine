@@ -890,7 +890,7 @@ The response reports the lengths actually used.
 | `z_entry` | float | 2.0 | 0 < z_entry ≤ 5; mean_reversion and pairs only |
 | `z_exit` | float | 0.5 | 0 ≤ z_exit < z_entry; mean_reversion and pairs only |
 | `signal_frequency` | `"monthly"` \| `"daily"` | `"monthly"` | trend and trend_portfolio only |
-| `cost_bps` | float | 10 | 0–100; one-way, per leg |
+| `cost_bps` | float | 2 | 0–100; one-way, per leg. It was 10 through Phase 9 (METHODOLOGY, Deviations, "After Phase 9") |
 | `execution_lag` | int | 1 | 0–5 |
 | `hedge_mode` | `"fixed_at_entry"` \| `"rolling"` | `"fixed_at_entry"` | pairs only |
 | `pairs_model` | `"ols"` \| `"kalman"` | `"ols"` | pairs only (Phase 7, §5.7) |
