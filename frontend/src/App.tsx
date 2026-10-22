@@ -1,113 +1,89 @@
 // Dashboard shell: the sidebar holds the settings, the main panel the views (§13). A Run sends the
-// backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel.
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ApiError, postBacktest, postMonteCarlo, postSensitivity } from './api'
-import { EquityPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
+// backtest first; once it succeeds, the sensitivity grid and Monte Carlo go out in parallel. The
+// walk-forward goes out only from its own panel's button. The settings live in the URL:
+// loading a URL fills the sidebar without sending anything, and each Run writes them back.
+//
+// The static demo is this same dashboard with `demo` set: the sidebar offers only the
+// recorded scenarios, requests are replayed (demo.ts), a banner dates the recording, the run history
+// is hidden, and the chosen scenario is shown at once, since a replay costs nothing.
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { postBacktest, postMonteCarlo, postSensitivity, postWalkForward } from './api'
+import { EquityPanel, PortfolioSignalPanel, RollingPanel, SignalPanel } from './components/BacktestCharts'
 import { CalendarPanel } from './components/CalendarPanel'
 import { CostSweepPanel } from './components/CostSweepPanel'
+import { ExportBar } from './components/ExportBar'
 import { KpiGrid } from './components/KpiGrid'
 import { MonteCarloPanel } from './components/MonteCarloPanel'
+import { RunHistoryPanel } from './components/RunHistoryPanel'
+import { AssumptionsFooter, DemoBanner, EmptyState, Notices, RunHeader, Warnings } from './components/RunViews'
 import { SensitivityHeatmap } from './components/SensitivityHeatmap'
 import { Sidebar } from './components/Sidebar'
 import { TradesTable } from './components/TradesTable'
 import { ErrorBoundary, ErrorBox, Loading } from './components/ui'
-import { buildRequests, defaultForm, isoDate, STRATEGY_LABEL, type FormState } from './form'
-import type { Async } from './state'
-import { assumptionLines, benchmarkName, firstOosIndex, seriesRows } from './transform'
+import { WalkForwardPanel } from './components/WalkForwardPanel'
+import { matchScenario, scenarioForm, type DemoManifest, type DemoScenario } from './demo'
+import { buildRequests, buildWalkForward, defaultForm, isoDate, type FormState } from './form'
+import { resolvedToForm } from './history'
+import { failure, type Async } from './state'
+import { benchmarkLabels, firstOosIndex, legRows, seriesRows } from './transform'
 import type {
   BacktestResponse,
   MonteCarloResponse,
-  ResolvedBacktestRun,
   SegmentKey,
   SensitivityResponse,
+  StoredRun,
+  WalkForwardResponse,
 } from './types'
+import { formToSearch, searchToForm } from './urlState'
 
-function failure(error: unknown): { status: 'error'; detail: string; httpStatus: number } {
-  if (error instanceof ApiError) return { status: 'error', detail: error.message, httpStatus: error.status }
-  return { status: 'error', detail: error instanceof Error ? error.message : String(error), httpStatus: 0 }
+/**
+ * The sidebar defaults: today is the default end date, so they are rebuilt where they are needed.
+ * In the demo they are the first recorded scenario, so its URL is the bare page.
+ */
+function defaults(demo: DemoManifest | null): FormState {
+  return demo ? scenarioForm(demo.scenarios[0]) : defaultForm(isoDate(new Date()))
 }
 
-function RunHeader(props: { bt: BacktestResponse }) {
-  const { bt } = props
-  const r = bt.resolved
-  return (
-    <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-      <h2 className="text-lg text-neutral-100">
-        {STRATEGY_LABEL[r.strategy]} <span className="text-neutral-500">·</span> {r.tickers.join(' / ')}
-      </h2>
-      <p className="text-xs text-neutral-500">
-        {r.start} → {r.end} · L {r.L} · first evaluated {r.first_evaluated_date} · split {r.split_date} · run #{bt.run_id} ·
-        engine {bt.engine_version}
-      </p>
-    </div>
-  )
+/** The page URL with the settings that differ from the defaults (§13), keeping the path and hash. */
+function urlFor(form: FormState, demo: DemoManifest | null): string {
+  const { pathname, hash } = window.location
+  return `${pathname}${formToSearch(form, defaults(demo))}${hash}`
 }
 
-function Warnings(props: { warnings: string[] }) {
-  if (props.warnings.length === 0) return null
-  return (
-    <div role="status" className="rounded border border-amber-800/70 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
-      <p className="mb-1 text-[11px] font-semibold tracking-widest text-amber-400 uppercase">
-        {props.warnings.length} warning{props.warnings.length === 1 ? '' : 's'}
-      </p>
-      <ul className="list-disc space-y-0.5 pl-5">
-        {props.warnings.map((w, i) => (
-          <li key={i}>{w}</li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-function AssumptionsFooter(props: { resolved: ResolvedBacktestRun }) {
-  return (
-    <footer className="border-t border-neutral-800 pt-3 text-[11px] text-neutral-500">
-      <p className="mb-1 tracking-widest uppercase">Assumptions</p>
-      <ul className="space-y-0.5">
-        {assumptionLines(props.resolved).map((line) => (
-          <li key={line}>{line}</li>
-        ))}
-      </ul>
-    </footer>
-  )
-}
-
-function EmptyState() {
-  return (
-    <div className="mt-24 max-w-xl space-y-2 text-sm text-neutral-400">
-      <p className="text-neutral-200">No run yet.</p>
-      <p>
-        Pick a strategy and tickers in the sidebar, then press <span className="text-emerald-400">Run</span>. A run sends
-        the backtest first, then the sensitivity grid and the Monte Carlo simulation.
-      </p>
-      <p className="text-neutral-500">Nothing is requested until you press Run.</p>
-    </div>
-  )
-}
-
-export default function App() {
-  const [form, setForm] = useState<FormState>(() => defaultForm(isoDate(new Date())))
+export default function App(props: { demo?: DemoManifest | null }) {
+  const demo = props.demo ?? null
+  // The URL fills the sidebar on load and sends nothing (§13); its ignored parameters become notices.
+  const [initial] = useState(() => searchToForm(window.location.search, defaults(demo)))
+  const [form, setForm] = useState<FormState>(initial.form)
+  const [notices, setNotices] = useState<string[]>(initial.notices)
   const [formError, setFormError] = useState<string | null>(null)
   const [lastRun, setLastRun] = useState<FormState | null>(null)
-  const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: 'idle' })
+  // The demo shows its scenario on load (the effect below), so it starts as loading, not empty.
+  const [backtest, setBacktest] = useState<Async<BacktestResponse>>({ status: demo ? 'loading' : 'idle' })
   const [sensitivity, setSensitivity] = useState<Async<SensitivityResponse>>({ status: 'idle' })
   const [monteCarlo, setMonteCarlo] = useState<Async<MonteCarloResponse>>({ status: 'idle' })
+  const [walkForward, setWalkForward] = useState<Async<WalkForwardResponse>>({ status: 'idle' })
+  const [walkForwardSent, setWalkForwardSent] = useState<string | null>(null) // the request's JSON
   const [showBenchmark, setShowBenchmark] = useState(true) // kept across runs
   const [segment, setSegment] = useState<SegmentKey>('full') // the KPI toggle; the cost sweep follows it
+  const [logScale, setLogScale] = useState(false) // the equity axis; kept across runs
+  const [historyKey, setHistoryKey] = useState(0) // bumped by each stored backtest, to reload the history
   const inFlight = useRef<AbortController | null>(null)
+  const walkForwardInFlight = useRef<AbortController | null>(null)
 
-  async function run() {
-    const built = buildRequests(form)
+  async function run(settings: FormState = form) {
+    const built = buildRequests(settings)
     if (!built.ok) {
       setFormError(built.error)
       return
     }
     setFormError(null)
+    window.history.replaceState(null, '', urlFor(settings, demo)) // settings only, never results
     inFlight.current?.abort() // a newer run replaces any request still in flight
     const controller = new AbortController()
     inFlight.current = controller
     const { signal } = controller
-    setLastRun(form)
+    setLastRun(settings)
     setBacktest({ status: 'loading' })
     setSensitivity({ status: 'loading' })
     setMonteCarlo({ status: 'loading' })
@@ -125,6 +101,7 @@ export default function App() {
     }
     if (signal.aborted) return
     setBacktest({ status: 'done', data: bt })
+    setHistoryKey((k) => k + 1) // the backtest is now stored
 
     // These two go out only now: the backtest has filled the price cache, whereas three
     // simultaneous cold-cache requests would each download the same tickers from Yahoo.
@@ -138,19 +115,72 @@ export default function App() {
     )
   }
 
+  // The walk-forward reruns the whole grid, so only its own button sends it (§13). A new Run leaves
+  // its result in place, marked stale when the sidebar no longer builds the same request.
+  async function runWalkForward() {
+    const built = buildWalkForward(form)
+    if (!built.ok) {
+      setWalkForward({ status: 'error', detail: built.error, httpStatus: 0 })
+      return
+    }
+    walkForwardInFlight.current?.abort()
+    const controller = new AbortController()
+    walkForwardInFlight.current = controller
+    setWalkForwardSent(JSON.stringify(built.request))
+    setWalkForward({ status: 'loading' })
+    try {
+      const data = await postWalkForward(built.request, controller.signal)
+      if (!controller.signal.aborted) setWalkForward({ status: 'done', data })
+    } catch (error) {
+      if (!controller.signal.aborted) setWalkForward(failure(error))
+    }
+  }
+
+  const walkForwardStale = useMemo(() => {
+    if (walkForward.status !== 'done') return false
+    const built = buildWalkForward(form)
+    return !built.ok || JSON.stringify(built.request) !== walkForwardSent
+  }, [walkForward, walkForwardSent, form])
+
+  // The demo replays its first scenario (or the URL's) on load; the live dashboard waits for Run.
+  const runOnLoad = useRef(demo !== null)
+  useEffect(() => {
+    if (!runOnLoad.current) return
+    runOnLoad.current = false
+    void run(initial.form)
+  })
+
+  // The demo's scenario picker: a replay is instant, so choosing a scenario shows it.
+  function onPickScenario(scenario: DemoScenario) {
+    const settings = scenarioForm(scenario)
+    setForm(settings)
+    setNotices([])
+    void run(settings)
+  }
+  const activeScenario = useMemo(() => (demo ? matchScenario(form, demo.scenarios) : null), [demo, form])
+
   const onUseSeed = useCallback((seed: number) => setForm((f) => ({ ...f, mcSeed: String(seed) })), [])
+
+  // "Load settings" fills the sidebar from a stored run without running it (§13 view 12).
+  const onLoadSettings = useCallback((run: StoredRun) => {
+    setForm((f) => resolvedToForm(run.resolved, f))
+    setFormError(null)
+    setNotices([`Loaded the settings of run #${run.id} into the sidebar. Press Run to re-run it.`])
+  }, [])
 
   const view = useMemo(() => {
     if (backtest.status !== 'done') return null
     const bt = backtest.data
     try {
       const { rows, unplacedMarkers } = seriesRows(bt.series, bt.trades)
+      const legs = legRows(bt.series, bt.trades) // trend portfolio only; empty otherwise
       return {
         bt,
         rows,
-        unplacedMarkers,
+        legs: legs.legs,
+        unplacedMarkers: unplacedMarkers + legs.unplacedMarkers,
         firstOos: firstOosIndex(bt.series.is_oos),
-        benchmark: benchmarkName(bt.resolved.strategy, bt.resolved.tickers),
+        benchmark: benchmarkLabels(bt.resolved.strategy, bt.resolved.tickers),
         error: null,
       }
     } catch (error) {
@@ -178,7 +208,8 @@ export default function App() {
     )
     content = (
       <>
-        <RunHeader bt={bt} />
+        <RunHeader bt={bt} demo={demo !== null} />
+        <ExportBar backtest={bt} />
         <Warnings warnings={bt.warnings} />
         {guard(
           'Performance',
@@ -197,6 +228,9 @@ export default function App() {
             benchmark={view.benchmark}
             showBenchmark={showBenchmark}
             onShowBenchmark={setShowBenchmark}
+            logScale={logScale}
+            onLogScale={setLogScale}
+            ruined={bt.ruined}
           />)}
         {guard('Rolling statistics', <RollingPanel rows={view.rows} firstOos={view.firstOos} />)}
         {guard(
@@ -205,11 +239,30 @@ export default function App() {
         )}
         {guard(
           'Signal',
-          <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />,
+          bt.resolved.strategy === 'trend_portfolio' ? (
+            <PortfolioSignalPanel
+              rows={view.rows}
+              legs={view.legs}
+              firstOos={view.firstOos}
+              backtest={bt}
+              unplacedMarkers={view.unplacedMarkers}
+            />
+          ) : (
+            <SignalPanel rows={view.rows} firstOos={view.firstOos} backtest={bt} unplacedMarkers={view.unplacedMarkers} />
+          ),
         )}
-        {guard('Trades', <TradesTable trades={bt.trades} pairs={bt.resolved.strategy === 'pairs'} />)}
+        {guard('Trades', <TradesTable trades={bt.trades} strategy={bt.resolved.strategy} />)}
         {guard('Cost sweep', <CostSweepPanel backtest={bt} segment={segment} />)}
         {guard('Sensitivity', <SensitivityHeatmap state={sensitivity} />)}
+        {guard(
+          'Walk-forward',
+          <WalkForwardPanel
+            state={walkForward}
+            onRun={() => void runWalkForward()}
+            stale={walkForwardStale}
+            showBenchmark={showBenchmark}
+          />,
+        )}
         {guard('Monte Carlo', <MonteCarloPanel state={monteCarlo} onUseSeed={onUseSeed} />)}
         <AssumptionsFooter resolved={bt.resolved} />
       </>
@@ -225,9 +278,20 @@ export default function App() {
         running={running}
         formError={formError}
         stale={stale}
+        demo={demo && { scenarios: demo.scenarios, active: activeScenario, onPick: onPickScenario }}
       />
       <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[1600px] space-y-4 p-6">{content}</div>
+        <div className="mx-auto max-w-[1600px] space-y-4 p-6">
+          {demo && <DemoBanner demo={demo} />}
+          <Notices notices={notices} onDismiss={() => setNotices([])} />
+          {content}
+          {/* The demo has no database, so no history (§13). */}
+          {!demo && (
+            <ErrorBoundary title="Run history">
+              <RunHistoryPanel reloadKey={historyKey} onLoadSettings={onLoadSettings} />
+            </ErrorBoundary>
+          )}
+        </div>
       </main>
     </div>
   )

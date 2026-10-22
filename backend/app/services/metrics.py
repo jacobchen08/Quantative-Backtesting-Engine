@@ -150,7 +150,9 @@ def pct_days_at_cap(gross_held: object, held: object, max_leverage: float) -> fl
     """Share of invested days whose held gross exposure is >= max_leverage * (1 - 1e-9) (§5.6).
 
     gross_held is sum_i |w_{i,t-1}|, the exposure held into each day; held marks the days whose
-    held_id is not null. None when no day is invested.
+    held_id is not null. None when no day is invested. For the trend portfolio (§5.8) the inputs
+    are per leg, (days, legs): |w_{i,t-1}| and whether leg i was held into day t, with the
+    per-leg cap max_leverage / N, so the share is of invested asset-days.
     """
     g, inv = _arr(gross_held), np.asarray(held, dtype=bool)
     if not inv.any():
@@ -192,7 +194,7 @@ def segment_metrics(
     turnover: object,
     cost: object,
     borrow: object,
-    trades: pd.DataFrame,
+    trades: pd.DataFrame | None,
 ) -> Metrics:
     """Strategy metrics for one segment (§8).
 
@@ -203,21 +205,28 @@ def segment_metrics(
         gross_held: sum_i |w_{i,t-1}| on each day.
         turnover, cost, borrow: daily turnover, trading cost and borrow fee (fractions of equity).
         trades: the trades entered in this segment, with columns open, pnl and holding_days.
+            None when trades aren't defined, as in the walk-forward's stitched series, whose
+            positions span configurations (§9.2): the four trade fields are then None.
 
     The segment's equity is rebased to its own baseline, so total_return, CAGR and the
     drawdown are measured within the segment.
     """
     tot, exc = _arr(total), _arr(excess)
     pct_in_market = float(np.mean(np.asarray(held, dtype=bool)))
-    closed = trades.loc[~trades["open"].to_numpy(dtype=bool)]
-    n_closed = len(closed)
+    trade_fields: dict = dict.fromkeys(("n_closed_trades", "n_open_trades", "win_rate", "avg_holding_days"))
+    if trades is not None:
+        closed = trades.loc[~trades["open"].to_numpy(dtype=bool)]
+        n_closed = len(closed)
+        trade_fields = {
+            "n_closed_trades": n_closed,
+            "n_open_trades": len(trades) - n_closed,
+            "win_rate": float((closed["pnl"] > 0).mean()) if n_closed else None,
+            "avg_holding_days": float(closed["holding_days"].mean()) if n_closed else None,
+        }
     return Metrics(
         **_return_fields(tot, exc, market_excess, exposed=pct_in_market > 0),
         pct_days_in_market=pct_in_market,
-        n_closed_trades=n_closed,
-        n_open_trades=len(trades) - n_closed,
-        win_rate=float((closed["pnl"] > 0).mean()) if n_closed else None,
-        avg_holding_days=float(closed["holding_days"].mean()) if n_closed else None,
+        **trade_fields,
         ann_turnover=float(np.mean(_arr(turnover)) * TRADING_DAYS),
         ann_cost_drag=float(np.mean(_arr(cost)) * TRADING_DAYS),
         ann_borrow_drag=float(np.mean(_arr(borrow)) * TRADING_DAYS),
@@ -430,11 +439,13 @@ def build_warnings(
     collinear_oos: bool = False,
     break_even_full_bps: float | None = None,
     cost_bps: float = 0.0,
+    per_leg_cap: bool = False,
 ) -> list[str]:
     """The §8 warnings that the pure core can detect.
 
     The data-cleaning warnings (§4.4) come from the loader and are added by the API.
     trades may carry a beta_at_entry column (pairs); NaN there means not applicable.
+    per_leg_cap: pct_at_cap is a share of invested asset-days against max_leverage / N (§5.8).
     """
     out: list[str] = []
     if coint_p_is is not None and coint_p_is >= COINT_ALPHA:
@@ -462,18 +473,64 @@ def build_warnings(
                 "the hedge adds exposure instead of offsetting it."
             )
     if ruin_date is not None:
-        out.append(
-            f"Ruin on {ruin_date:%Y-%m-%d}: that day's loss reached 100% of equity, so the evaluation "
-            "window ends there (limited liability, no margin calls)."
-        )
+        out.append(ruin_warning(ruin_date))
     if pct_at_cap is not None and pct_at_cap > CAP_WARNING_SHARE:
+        where = (
+            "Legs were at their leverage cap (max_leverage / N) on "
+            if per_leg_cap
+            else "The position was at the leverage cap on "
+        )
+        days = "invested asset-days" if per_leg_cap else "invested days"
         out.append(
-            f"The position was at the leverage cap on {pct_at_cap:.0%} of invested days (more than "
-            f"{CAP_WARNING_SHARE:.0%}): the volatility target is not reachable within max_leverage."
+            f"{where}{pct_at_cap:.0%} of {days} (more than {CAP_WARNING_SHARE:.0%}): "
+            "the volatility target is not reachable within max_leverage."
         )
     if break_even_full_bps is not None and break_even_full_bps < BREAK_EVEN_MULTIPLE * cost_bps:
         out.append(
             f"The full-period break-even cost is {break_even_full_bps:.1f} bps, below twice the request's "
             f"{cost_bps:g} bps: the strategy's edge is less than twice its trading cost."
         )
+    return out
+
+
+def ruin_warning(ruin_date: pd.Timestamp) -> str:
+    """The §8 ruin warning, shared by the backtest and the walk-forward."""
+    return (
+        f"Ruin on {ruin_date:%Y-%m-%d}: that day's loss reached 100% of equity, so the evaluation "
+        "window ends there (limited liability, no margin calls)."
+    )
+
+
+def walk_forward_warnings(
+    *,
+    selected: list[object | None],
+    test_windows: list[tuple[pd.Timestamp, pd.Timestamp]],
+    ruin_date: pd.Timestamp | None,
+) -> list[str]:
+    """The §8 walk-forward warnings (§9.2).
+
+    Args:
+        selected: each fold's chosen configuration, in fold order; None for a flat fold.
+        test_windows: each fold's first and last test day.
+        ruin_date: the stitched series' ruin day, if any.
+
+    A fold with no eligible configuration is flat and gets a warning. The selection is
+    unstable when it changed from the previous fold in more than half the folds.
+    """
+    out: list[str] = []
+    for j, (cell, (first, last)) in enumerate(zip(selected, test_windows, strict=True)):
+        if cell is None:
+            out.append(
+                f"Fold {j} (test {first:%Y-%m-%d} to {last:%Y-%m-%d}): no configuration was eligible, "
+                "so the walk-forward was flat."
+            )
+    n_folds = len(selected)
+    changes = sum(selected[j] != selected[j - 1] for j in range(1, n_folds))
+    if changes > n_folds / 2:
+        out.append(
+            f"The selected configuration changed in {changes} of {n_folds} folds: the selected parameters "
+            "were unstable across folds."
+        )
+    if ruin_date is not None:
+        out.append(ruin_warning(ruin_date))
     return out

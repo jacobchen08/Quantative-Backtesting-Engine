@@ -102,6 +102,17 @@ export function ErrorBox(props: { title: string; detail: string; httpStatus?: nu
   )
 }
 
+/** A labelled figure with a line of context under it. */
+export function Stat(props: { label: string; value: string; sub: string; title?: string }) {
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2" title={props.title}>
+      <p className="text-[11px] text-neutral-500">{props.label}</p>
+      <p className="text-lg leading-tight text-neutral-100 tabular-nums">{props.value}</p>
+      <p className="text-[11px] text-neutral-500 tabular-nums">{props.sub}</p>
+    </div>
+  )
+}
+
 export function Muted(props: { children: ReactNode }) {
   return <p className="text-sm text-neutral-500">{props.children}</p>
 }
@@ -124,4 +135,31 @@ export function AsyncNotice<T>(props: { state: Async<T>; what: string; errorTitl
     case 'done':
       return null
   }
+}
+
+/** A chart's caption, with its legend on the right. */
+export function ChartTitle(props: { children: ReactNode; legend?: ReactNode }) {
+  return (
+    <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 text-[11px] text-neutral-500">
+      <span className="tracking-widest uppercase">{props.children}</span>
+      {props.legend && <span className="flex flex-wrap gap-x-3">{props.legend}</span>}
+    </div>
+  )
+}
+
+/** One legend entry: a line sample (solid or dashed) or a glyph, in the series' colour. */
+export function Key(props: { color: string; children: ReactNode; dashed?: boolean; glyph?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {props.glyph ? (
+        <span style={{ color: props.color }}>{props.glyph}</span>
+      ) : (
+        <span
+          className="inline-block w-4"
+          style={{ borderTop: `${props.dashed ? '1px dashed' : '2px solid'} ${props.color}` }}
+        />
+      )}
+      {props.children}
+    </span>
+  )
 }

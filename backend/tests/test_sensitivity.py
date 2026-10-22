@@ -1,6 +1,6 @@
 """Parameter sensitivity grid and deflated Sharpe ratio (§12, test_sensitivity.py).
 
-Tests pipeline.run_sensitivity and pipeline.deflated_sharpe directly.
+Tests sensitivity.run_sensitivity and sensitivity.deflated_sharpe directly.
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ from scipy.stats import norm
 
 from app.services import stats
 from app.services.backtester import InsufficientDataError, run_backtest
-from app.services.pipeline import StrategyParams, build_report, deflated_sharpe, run_sensitivity, run_strategy
+from app.services.pipeline import StrategyParams, run_strategy
+from app.services.report import build_report
+from app.services.sensitivity import deflated_sharpe, run_grid, run_sensitivity
 
 DEFAULT_REQUESTS = [
     StrategyParams(strategy="mean_reversion", tickers=("Y",), L=60),
@@ -138,6 +140,29 @@ def test_each_cell_is_the_sharpe_on_the_common_window(
     assert dsr.best.dsr == pytest.approx(reference_psr(trials[best][1], sr0), rel=1e-12, abs=1e-15)
     own = trials[res.selected][1]
     assert dsr.selected_dsr == pytest.approx(reference_psr(own, sr0), rel=1e-12, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        StrategyParams(strategy="pairs", tickers=("Y", "X"), L=60, vol_target=0.1),
+        StrategyParams(strategy="pairs", tickers=("Y", "X"), L=60, pairs_model="kalman"),
+        StrategyParams(strategy="mean_reversion", tickers=("Y",), L=60, vol_target=0.15, vol_refresh="daily"),
+    ],
+    ids=["pairs-overlay", "kalman", "mean-reversion-overlay"],
+)
+def test_sharing_one_score_per_L_changes_no_cell(
+    prices: pd.DataFrame, rf: pd.Series, params: StrategyParams
+) -> None:
+    """run_grid computes steps 1-2 once per L; every cell must equal its own, uncached run exactly."""
+    split = run_strategy(prices, rf, params).split_date
+    Ls, zs = (40, 60), (1.5, 2.0, 2.5)
+    runs = run_grid(prices, rf, params, Ls, zs, split, label="test", where="here")
+    for (L, z), run in runs.items():
+        alone = run_strategy(prices, rf, config(params, L, z, split), trades=False)
+        pd.testing.assert_series_equal(run.score, alone.score, check_exact=True)
+        pd.testing.assert_frame_equal(run.weights, alone.weights, check_exact=True)
+        pd.testing.assert_series_equal(run.backtest.excess, alone.backtest.excess, check_exact=True)
 
 
 def test_a_configuration_without_exposure_gives_a_null_cell(prices: pd.DataFrame, rf: pd.Series) -> None:

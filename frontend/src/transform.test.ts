@@ -1,30 +1,43 @@
 import { describe, expect, it } from 'vitest'
 import {
   assumptionLines,
-  benchmarkName,
+  benchmarkLabels,
+  blockLengthLabel,
   calendarGrid,
+  configLabel,
   costSweepView,
   divergingColor,
+  equityLogAxis,
   fanRows,
+  fmtDelta,
   firstOosIndex,
+  foldBands,
   heatmapBound,
   heatmapLayout,
   histogramRows,
+  legRows,
+  logAxis,
   lookbackLabel,
   niceTicks,
   NULL_CELL,
   segmentRange,
+  selectionChanges,
   seriesRows,
   sortTrades,
+  walkForwardRows,
 } from './transform'
 import type {
   CalendarReturns,
   CostSensitivity,
+  Fold,
+  LegSeries,
   ModelResult,
+  MonteCarloResponse,
   ResolvedBacktestRun,
   SensitivityResponse,
   Series,
   Trade,
+  WalkForwardSeries,
 } from './types'
 
 // Six days from s0: two warm-up days with no equity yet, the baseline on day 2, then three
@@ -45,8 +58,25 @@ function makeSeries(overrides: Partial<Series> = {}): Series {
     is_oos: [false, false, false, false, true, true],
     rolling_sharpe: [null, null, null, null, 0.8, 0.75],
     rolling_beta: [null, null, null, null, 0.1, 0.12],
+    legs: null,
     ...overrides,
   }
+}
+
+function leg(ticker: string, overrides: Partial<LegSeries> = {}): LegSeries {
+  return {
+    ticker,
+    score: [null, null, 0.05, 0.04, -0.01, -0.02],
+    position: [0, 0, 0, 1, 1, -1],
+    weight: [0, 0, 0.25, 0.25, -0.2, -0.2],
+    vol_forecast: [null, 0.2, 0.21, 0.19, 0.18, 0.2],
+    ...overrides,
+  }
+}
+
+/** A trend-portfolio series: no top-level score, one entry per leg in `legs`. */
+function portfolioSeries(legs: LegSeries[]): Series {
+  return makeSeries({ score: null, legs, position: [0, 0, 1, 1, 1, 1] })
 }
 
 function trade(overrides: Partial<Trade>): Trade {
@@ -62,6 +92,7 @@ function trade(overrides: Partial<Trade>): Trade {
     holding_days: 2,
     pnl: 0.01,
     beta_at_entry: null,
+    ticker: null,
     ...overrides,
   }
 }
@@ -138,13 +169,69 @@ describe('seriesRows: the shared rows of every synchronized chart (§13)', () =>
     expect(firstOosIndex(makeSeries().is_oos)).toBe(4)
     expect(firstOosIndex([false, false, false])).toBe(-1)
   })
+
+  it('a trend portfolio has no top-level score: null scores, and its markers go on the legs', () => {
+    const series = portfolioSeries([leg('SPY'), leg('GLD')])
+    const { rows, unplacedMarkers } = seriesRows(series, [trade({ ticker: 'SPY', signal_date: '2020-01-06' })])
+    expect(rows.every((r) => r.score === null)).toBe(true)
+    expect(rows.every((r) => r.entryLong === null && r.entryShort === null && r.exit === null)).toBe(true)
+    expect(unplacedMarkers).toBe(0)
+    expect(() => seriesRows(portfolioSeries([leg('SPY', { weight: [0, 1] })]), [])).toThrow(/different lengths/)
+  })
+})
+
+describe('legRows: the trend portfolio’s per-leg charts (§13, view 3)', () => {
+  it('keeps one row per date for every leg, in the request’s order', () => {
+    const spy = leg('SPY')
+    const gld = leg('GLD', { score: [null, null, -0.1, -0.12, -0.08, 0.02], weight: [0, 0, -0.5, -0.5, -0.5, 0.4] })
+    const { legs } = legRows(portfolioSeries([spy, gld]), [])
+    expect(legs.map((l) => l.ticker)).toEqual(['SPY', 'GLD'])
+    expect(legs[1].rows.map((r) => r.date)).toEqual(makeSeries().dates)
+    expect(legs[1].rows.map((r) => r.score)).toEqual(gld.score)
+    expect(legs[1].weight).toEqual(gld.weight)
+    expect(legs[0].volForecast).toEqual(spy.vol_forecast)
+  })
+
+  it('puts each trade’s markers on its own leg only', () => {
+    const trades = [
+      trade({ id: 1, ticker: 'SPY', side: 'long', signal_date: '2020-01-03', exit_signal_date: '2020-01-07' }),
+      trade({ id: 2, ticker: 'GLD', side: 'short', signal_date: '2020-01-06', exit_signal_date: null, open: true }),
+    ]
+    const { legs, unplacedMarkers } = legRows(portfolioSeries([leg('SPY'), leg('GLD')]), trades)
+    const marked = (i: number) =>
+      legs[i].rows.filter((r) => r.entryLong !== null || r.entryShort !== null || r.exit !== null).map((r) => r.date)
+    expect(marked(0)).toEqual(['2020-01-03', '2020-01-07'])
+    expect(marked(1)).toEqual(['2020-01-06'])
+    expect(legs[0].rows[1].entryLong).toBe(0) // a null score (warm-up) puts the marker at 0
+    expect(legs[0].rows[3].exit).toBe(0.04)
+    expect(legs[1].rows[2].entryShort).toBe(0.05)
+    expect(unplacedMarkers).toBe(0)
+    const outside = legRows(portfolioSeries([leg('SPY')]), [trade({ ticker: 'SPY', signal_date: '2019-12-31' })])
+    expect(outside.unplacedMarkers).toBe(1)
+  })
+
+  it('is empty for the other strategies, and rejects a leg of the wrong length', () => {
+    expect(legRows(makeSeries(), [trade({})])).toEqual({ legs: [], unplacedMarkers: 0 })
+    expect(() => legRows(portfolioSeries([leg('SPY', { vol_forecast: [0.1] })]), [])).toThrow(/SPY leg/)
+  })
 })
 
 describe('labels', () => {
-  it('benchmarks A and C on the traded ticker and pairs on SPY (§6.4)', () => {
-    expect(benchmarkName('mean_reversion', ['KO'])).toBe('KO')
-    expect(benchmarkName('trend', ['GLD'])).toBe('GLD')
-    expect(benchmarkName('pairs', ['KO', 'PEP'])).toBe('SPY')
+  it('benchmarks A and C on the traded ticker, pairs on SPY and the portfolio on its basket (§6.4)', () => {
+    expect(benchmarkLabels('mean_reversion', ['KO'])).toEqual({
+      name: 'Buy & hold KO',
+      phrase: 'buy & hold KO', // the ticker keeps its case inside a sentence
+      short: 'B&H KO',
+      tag: 'B&H',
+    })
+    expect(benchmarkLabels('trend', ['GLD']).name).toBe('Buy & hold GLD')
+    expect(benchmarkLabels('pairs', ['KO', 'PEP']).short).toBe('B&H SPY')
+    expect(benchmarkLabels('trend_portfolio', ['SPY', 'GLD'])).toEqual({
+      name: 'Equal-weight basket',
+      phrase: 'equal-weight basket',
+      short: 'EW basket',
+      tag: 'EW',
+    })
   })
 
   const dates = { first_evaluated_date: '2015-04-01', split_date: '2022-08-05', end: '2025-12-31' }
@@ -196,6 +283,53 @@ describe('labels', () => {
     ])
     const pairs = assumptionLines({ ...resolved, strategy: 'pairs' })
     expect(pairs[2]).toBe('Shorting: required (a pair always holds a short leg)')
+  })
+
+  it('states the pairs model, and the trend portfolio’s per-asset sizing', () => {
+    const base = {
+      strategy: 'pairs',
+      tickers: ['KO', 'PEP'],
+      L: 60,
+      cost_bps: 10,
+      borrow_bps: 0,
+      allow_short: true,
+      execution_lag: 1,
+      rf_source: '13-week T-bill (^IRX)',
+      pairs_model: 'ols',
+      kalman_delta: null,
+      vol_target: null,
+      vol_halflife: null,
+      vol_refresh: null,
+      max_leverage: null,
+    } as ResolvedBacktestRun
+    expect(assumptionLines(base).at(-2)).toBe('Pairs model: rolling OLS over 60 days')
+    expect(assumptionLines({ ...base, pairs_model: 'kalman', kalman_delta: 1e-6 }).at(-2)).toBe(
+      'Pairs model: Kalman filter, δ = 1e-6, started from an OLS fit on the first 60 days',
+    )
+    expect([fmtDelta(1e-6), fmtDelta(0.00025), fmtDelta(1e-2), fmtDelta(null)]).toEqual(['1e-6', '2.5e-4', '1e-2', '—'])
+    const portfolio = assumptionLines({
+      ...base,
+      strategy: 'trend_portfolio',
+      tickers: ['SPY', 'QQQ', 'GLD', 'TLT'],
+      L: 252,
+      pairs_model: null,
+      vol_target: 0.4,
+      vol_halflife: 42,
+      vol_refresh: 'weekly',
+      max_leverage: 2,
+    })
+    expect(portfolio.some((line) => line.startsWith('Pairs model'))).toBe(false)
+    expect(portfolio.at(-1)).toBe(
+      'Vol targeting: always on, 40% a year per asset, 42-day EWMA half-life, weekly refresh, each leg at most 2.0× / 4 (gross at most 2.0×)',
+    )
+  })
+
+  it('names the block lengths a Monte Carlo run used (§10.8)', () => {
+    const resolved = (block_len: number | 'auto', circular: number, stationary: number) =>
+      ({ block_len, block_len_used: { circular, stationary } }) as MonteCarloResponse['resolved']
+    expect(blockLengthLabel(resolved(10, 10, 10))).toBe("10 days (the stationary bootstrap's mean)")
+    expect(blockLengthLabel(resolved(1, 1, 1))).toBe("1 day (the stationary bootstrap's mean)")
+    expect(blockLengthLabel(resolved('auto', 9, 8))).toBe('auto: 9 days circular, mean 8 days stationary')
   })
 })
 
@@ -427,5 +561,157 @@ describe('calendar grid (§8.2)', () => {
 
   it('rejects a month whose year has no annual row', () => {
     expect(() => calendarGrid({ ...calendar, annual: calendar.annual.slice(1) })).toThrow(/2020-11/)
+  })
+})
+
+// ---------------------------------------------------------------- walk-forward (§9.2)
+
+// The baseline, fold 0's entry day and two test days, then folds 1 and 2 of two days and a one-day fold 3.
+function makeWalkForwardSeries(overrides: Partial<WalkForwardSeries> = {}): WalkForwardSeries {
+  return {
+    dates: ['2021-01-04', '2021-01-05', '2021-01-06', '2021-01-07', '2021-01-08', '2021-01-11', '2021-01-12', '2021-01-13', '2021-01-14'],
+    equity: [100000, 99990, 100200, 100100, 100500, 100400, 100900, 101000, 100800],
+    fixed_equity: [100000, 100100, 100300, 100250, 0, null, null, null, null], // ruined on 2021-01-08
+    benchmark_equity: [100000, 100050, 100120, 100300, 100200, 100600, 100700, 100650, 100900],
+    fold: [null, 0, 0, 0, 1, 1, 2, 2, 3],
+    ...overrides,
+  }
+}
+
+function fold(selected: Fold['selected'], overrides: Partial<Fold> = {}): Fold {
+  return {
+    train_start: '2018-01-02',
+    train_end: '2020-12-31',
+    test_start: '2021-01-04',
+    test_end: '2021-03-31',
+    selected,
+    train_sharpe: selected === null ? null : 0.8,
+    test_sharpe: null,
+    ...overrides,
+  }
+}
+
+describe('walkForwardRows', () => {
+  it('keeps one row per date with every series, nulls included', () => {
+    const series = makeWalkForwardSeries()
+    const rows = walkForwardRows(series)
+    expect(rows.map((r) => r.date)).toEqual(series.dates)
+    expect(rows.map((r) => r.equity)).toEqual(series.equity)
+    expect(rows.map((r) => r.fixed)).toEqual(series.fixed_equity) // a gap after the fixed run's ruin
+    expect(rows.map((r) => r.benchmark)).toEqual(series.benchmark_equity)
+    expect(rows.map((r) => r.fold)).toEqual(series.fold)
+  })
+
+  it('rejects arrays of different lengths', () => {
+    expect(() => walkForwardRows(makeWalkForwardSeries({ fold: [null, 0] }))).toThrow(/different lengths/)
+    expect(() => walkForwardRows(makeWalkForwardSeries({ fixed_equity: [] }))).toThrow(/different lengths/)
+  })
+})
+
+describe('foldBands: alternate test folds are shaded (§13, view 11)', () => {
+  it('spans each odd fold from its first to its last date', () => {
+    expect(foldBands(makeWalkForwardSeries())).toEqual([
+      { fold: 1, x1: '2021-01-08', x2: '2021-01-11' },
+      { fold: 3, x1: '2021-01-14', x2: '2021-01-14' }, // a one-day fold
+    ])
+  })
+
+  it('shades nothing with a single fold, and skips the baseline', () => {
+    const one = makeWalkForwardSeries({ fold: [null, 0, 0, 0, 0, 0, 0, 0, 0] })
+    expect(foldBands(one)).toEqual([])
+    const two = makeWalkForwardSeries({ fold: [null, 0, 0, 0, 0, 1, 1, 1, 1] })
+    expect(foldBands(two)).toEqual([{ fold: 1, x1: '2021-01-11', x2: '2021-01-14' }])
+  })
+})
+
+describe('the fold table', () => {
+  it('labels a configuration like the heatmap, and a flat fold as flat', () => {
+    expect(configLabel({ L: 60, z_entry: 2 })).toBe('L 60 · z 2.0')
+    expect(configLabel({ L: 40, z_entry: 2.25 })).toBe('L 40 · z 2.25')
+    expect(configLabel({ L: 252, z_entry: null })).toBe('L 252 (12m)') // trend
+    expect(configLabel({ L: 250, z_entry: null })).toBe('L 250')
+    expect(configLabel(null)).toBe('flat')
+  })
+
+  it('marks every fold whose choice differs from the one before, by value', () => {
+    const folds = [
+      fold({ L: 60, z_entry: 2 }),
+      fold({ L: 60, z_entry: 2 }), // equal but a different object: no change
+      fold({ L: 60, z_entry: 2.5 }),
+      fold(null),
+      fold(null),
+      fold({ L: 20, z_entry: 2.5 }),
+      fold({ L: 20, z_entry: null }),
+    ]
+    expect(selectionChanges(folds)).toEqual([false, false, true, true, false, true, true])
+    expect(selectionChanges([fold({ L: 20, z_entry: 1.5 }), fold(null)])).toEqual([false, true]) // the second fold
+    expect(selectionChanges([])).toEqual([])
+  })
+})
+
+describe('logAxis: the log-scale equity axis (§13 view 2)', () => {
+  it('puts ticks at 1, 2 and 5 × 10^k, with the domain widened to the nearest such values', () => {
+    expect(logAxis(80_000, 260_000)).toEqual({ domain: [50_000, 500_000], ticks: [50_000, 100_000, 200_000, 500_000] })
+    expect(logAxis(100_000, 180_000)).toEqual({ domain: [100_000, 200_000], ticks: [100_000, 200_000] })
+    expect(logAxis(0.3, 0.45)).toEqual({ domain: [0.2, 0.5], ticks: [0.2, 0.5] })
+  })
+
+  it('has no float noise in its ticks', () => {
+    const axis = logAxis(0.0011, 0.07)
+    expect(axis?.ticks).toEqual([0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1])
+    expect(logAxis(3e-6, 8e-6)?.ticks).toEqual([2e-6, 5e-6, 1e-5]) // 5 * 10 ** -6 is 4.9999999999999996e-6
+  })
+
+  it('every tick is a 1, 2 or 5 inside the domain, and there are at least two', () => {
+    for (const [lo, hi] of [[1, 1], [3, 3], [99_999, 100_001], [12_345, 9_876_543], [5e4, 5e4], [7, 1e9]]) {
+      const axis = logAxis(lo, hi)
+      expect(axis).not.toBeNull()
+      const { domain, ticks } = axis!
+      expect(domain[0]).toBeLessThanOrEqual(lo)
+      expect(domain[1]).toBeGreaterThanOrEqual(hi)
+      expect(ticks.length).toBeGreaterThanOrEqual(2)
+      for (const t of ticks) {
+        expect(t).toBeGreaterThanOrEqual(domain[0])
+        expect(t).toBeLessThanOrEqual(domain[1])
+        expect(['1', '2', '5']).toContain(t.toExponential().charAt(0))
+        expect(t.toExponential()).toMatch(/^[125]e/)
+      }
+    }
+  })
+
+  it('keeps a flat series on two ticks', () => {
+    expect(logAxis(100_000, 100_000)).toEqual({ domain: [100_000, 200_000], ticks: [100_000, 200_000] })
+  })
+
+  it('keeps only the powers of ten over many decades', () => {
+    expect(logAxis(5, 2e6)).toEqual({ domain: [5, 2e6], ticks: [10, 100, 1000, 10_000, 100_000, 1_000_000] })
+    expect(logAxis(1000, 5e5)?.ticks).toHaveLength(9) // 1, 2, 5 over nine values still fits
+    expect(logAxis(1000, 1e6)?.ticks).toEqual([1000, 10_000, 100_000, 1_000_000]) // ten would not
+  })
+
+  it('is null when the range is not positive: a ruined run reaches 0', () => {
+    expect(logAxis(0, 100_000)).toBeNull()
+    expect(logAxis(-5, 10)).toBeNull()
+    expect(logAxis(10, 5)).toBeNull()
+    expect(logAxis(1, Infinity)).toBeNull()
+    expect(logAxis(Number.NaN, 5)).toBeNull()
+  })
+})
+
+describe('equityLogAxis', () => {
+  it('spans the equity, and the benchmark only while it is shown', () => {
+    const { rows } = seriesRows(
+      makeSeries({ equity: [null, null, 100000, 150000, 120000, 130000], benchmark_equity: [null, null, 100000, 99000, 98000, 260000] }),
+      [],
+    )
+    expect(equityLogAxis(rows, false)?.domain).toEqual([100_000, 200_000])
+    expect(equityLogAxis(rows, true)?.domain).toEqual([50_000, 500_000])
+  })
+
+  it('is null for a ruined run and for one with no equity yet', () => {
+    const ruined = seriesRows(makeSeries({ equity: [null, null, 100000, 50000, 10000, 0] }), []).rows
+    expect(equityLogAxis(ruined, false)).toBeNull()
+    const empty = seriesRows(makeSeries({ equity: [null, null, null, null, null, null] }), []).rows
+    expect(equityLogAxis(empty, false)).toBeNull()
   })
 })

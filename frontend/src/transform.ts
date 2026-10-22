@@ -1,15 +1,19 @@
 // Pure transforms from API responses to chart rows, table orderings and labels.
-import { fmtLag, fmtMultiple, fmtRate } from './format'
+import { fmtDayCount, fmtLag, fmtMultiple, fmtRate } from './format'
 import type {
   CalendarReturns,
   CostSensitivity,
+  Fold,
+  GridCell,
   ModelResult,
+  MonteCarloResponse,
   ResolvedBacktestRun,
   SegmentKey,
   SensitivityResponse,
   Series,
   Strategy,
   Trade,
+  WalkForwardSeries,
 } from './types'
 
 // ---------------------------------------------------------------- backtest series
@@ -52,11 +56,11 @@ export function seriesRows(series: Series, trades: readonly Trade[]): SeriesRows
     series.daily_return,
     series.position,
     series.gross_exposure,
-    series.score,
     series.is_oos,
     series.rolling_sharpe,
     series.rolling_beta,
-    ...[series.beta, series.beta_used, series.vol_forecast].filter((a) => a !== null),
+    ...[series.score, series.beta, series.beta_used, series.vol_forecast].filter((a) => a !== null),
+    ...(series.legs ?? []).flatMap((leg) => [leg.score, leg.position, leg.weight, leg.vol_forecast]),
   ]
   if (arrays.some((a) => a.length !== n)) throw new Error('The series arrays have different lengths.')
 
@@ -65,7 +69,7 @@ export function seriesRows(series: Series, trades: readonly Trade[]): SeriesRows
     equity: series.equity[i],
     benchmark: series.benchmark_equity[i],
     drawdown: series.drawdown[i],
-    score: series.score[i],
+    score: series.score?.[i] ?? null,
     beta: series.beta?.[i] ?? null,
     betaUsed: series.beta_used?.[i] ?? null,
     exposure: series.gross_exposure[i],
@@ -78,20 +82,70 @@ export function seriesRows(series: Series, trades: readonly Trade[]): SeriesRows
     exit: null,
   }))
 
-  const index = new Map(series.dates.map((date, i) => [date, i]))
-  // An exit forced by a NaN score (a degenerate window means flat) has no score to sit on: use 0.
-  const markerY = (i: number) => series.score[i] ?? 0
-  let unplacedMarkers = 0
-  const place = (date: string, field: 'entryLong' | 'entryShort' | 'exit') => {
+  // The trend portfolio's markers go on each leg's own chart (legRows), not here.
+  const unplacedMarkers = series.score === null ? 0 : placeMarkers(rows, series.dates, series.score, trades)
+  return { rows, unplacedMarkers }
+}
+
+type MarkerRow = { entryLong: number | null; entryShort: number | null; exit: number | null }
+
+/**
+ * Puts each trade's entry and exit markers on its signal dates, at the score's value there, and
+ * returns how many dates were not in the series. An exit forced by a NaN score (a degenerate window
+ * means flat) has no score to sit on: it goes at 0.
+ */
+function placeMarkers(
+  rows: MarkerRow[],
+  dates: readonly string[],
+  score: readonly (number | null)[],
+  trades: readonly Trade[],
+): number {
+  const index = new Map(dates.map((date, i) => [date, i]))
+  let unplaced = 0
+  const place = (date: string, field: keyof MarkerRow) => {
     const i = index.get(date)
-    if (i === undefined) unplacedMarkers += 1
-    else rows[i][field] = markerY(i)
+    if (i === undefined) unplaced += 1
+    else rows[i][field] = score[i] ?? 0
   }
   for (const trade of trades) {
     place(trade.signal_date, trade.side === 'long' ? 'entryLong' : 'entryShort')
     if (trade.exit_signal_date !== null) place(trade.exit_signal_date, 'exit')
   }
-  return { rows, unplacedMarkers }
+  return unplaced
+}
+
+export type LegRow = MarkerRow & { date: string; score: number | null }
+
+export type LegView = {
+  ticker: string
+  rows: LegRow[] // one per series date, like seriesRows
+  weight: number[] // executed weight at each close
+  volForecast: (number | null)[] // annualized EWMA sigma of the leg's own return
+}
+
+/**
+ * The trend portfolio's legs (§13, view 3): for each leg, its score with the markers of its own
+ * trades (filtered by ticker), its weights and its vol forecast, on the series dates. Returns the
+ * legs in the request's order and the markers whose dates are not in the series.
+ */
+export function legRows(series: Series, trades: readonly Trade[]): { legs: LegView[]; unplacedMarkers: number } {
+  let unplacedMarkers = 0
+  const legs = (series.legs ?? []).map((leg) => {
+    if ([leg.score, leg.position, leg.weight, leg.vol_forecast].some((a) => a.length !== series.dates.length)) {
+      throw new Error(`The ${leg.ticker} leg's arrays have a different length from the series.`)
+    }
+    const rows: LegRow[] = series.dates.map((date, i) => ({
+      date,
+      score: leg.score[i],
+      entryLong: null,
+      entryShort: null,
+      exit: null,
+    }))
+    const own = trades.filter((t) => t.ticker === leg.ticker)
+    unplacedMarkers += placeMarkers(rows, series.dates, leg.score, own)
+    return { ticker: leg.ticker, rows, weight: leg.weight, volForecast: leg.vol_forecast }
+  })
+  return { legs, unplacedMarkers }
 }
 
 /** Index of the first out-of-sample row, or -1 if the series ends before the split (ruin in IS). */
@@ -99,9 +153,23 @@ export function firstOosIndex(isOos: readonly boolean[]): number {
   return isOos.indexOf(true)
 }
 
-/** Strategies A and C are benchmarked against the traded ticker, pairs against SPY (§6.4). */
-export function benchmarkName(strategy: Strategy, tickers: readonly string[]): string {
-  return strategy === 'pairs' ? 'SPY' : tickers[0]
+export type BenchmarkLabels = {
+  name: string // a label: "Buy & hold SPY", "Equal-weight basket"
+  phrase: string // inside a sentence: "buy & hold SPY", "equal-weight basket"
+  short: string // a column header: "B&H SPY", "EW basket"
+  tag: string // before a benchmark figure in a tile: "B&H", "EW"
+}
+
+/**
+ * The benchmark of §6.4: buy-and-hold of the traded ticker (mean reversion, trend), of SPY
+ * (pairs), or the equal-weight, daily-rebalanced basket of the legs (trend portfolio, §5.8).
+ */
+export function benchmarkLabels(strategy: Strategy, tickers: readonly string[]): BenchmarkLabels {
+  if (strategy === 'trend_portfolio') {
+    return { name: 'Equal-weight basket', phrase: 'equal-weight basket', short: 'EW basket', tag: 'EW' }
+  }
+  const ticker = strategy === 'pairs' ? 'SPY' : tickers[0]
+  return { name: `Buy & hold ${ticker}`, phrase: `buy & hold ${ticker}`, short: `B&H ${ticker}`, tag: 'B&H' }
 }
 
 /**
@@ -120,9 +188,14 @@ export function segmentRange(
   return `${r.first_evaluated_date} → ${last}`
 }
 
+/** The Kalman δ in exponent form: 1e-6 -> "1e-6", 0.00025 -> "2.5e-4". */
+export function fmtDelta(delta: number | null): string {
+  return delta === null ? '—' : delta.toExponential().replace('e+', 'e')
+}
+
 /** The assumptions footer (§13), from what the API actually used rather than from the form. */
 export function assumptionLines(r: ResolvedBacktestRun): string[] {
-  return [
+  const lines = [
     `Costs: ${r.cost_bps} bps one-way, per leg, on traded notional`,
     r.borrow_bps > 0
       ? `Borrow fee: ${r.borrow_bps} bps a year on short notional, charged daily`
@@ -135,11 +208,28 @@ export function assumptionLines(r: ResolvedBacktestRun): string[] {
     `Execution lag: ${fmtLag(r.execution_lag)}`,
     `Risk-free rate: ${r.rf_source}; idle cash and short-sale proceeds earn it`,
     'Rebalancing: daily, to target weights; turnover from price drift is ignored',
-    r.vol_target === null
-      ? 'Vol targeting: off'
-      : `Vol targeting: ${fmtRate(r.vol_target)} annual target, ${r.vol_halflife}-day EWMA half-life, ` +
-        `${r.vol_refresh} refresh, ${fmtMultiple(r.max_leverage, 1)} max leverage`,
   ]
+  if (r.strategy === 'pairs') {
+    lines.push(
+      r.pairs_model === 'kalman'
+        ? `Pairs model: Kalman filter, δ = ${fmtDelta(r.kalman_delta)}, started from an OLS fit on the first ${r.L} days`
+        : `Pairs model: rolling OLS over ${r.L} days`,
+    )
+  }
+  const sizing = `${r.vol_halflife}-day EWMA half-life, ${r.vol_refresh} refresh`
+  if (r.strategy === 'trend_portfolio') {
+    lines.push(
+      `Vol targeting: always on, ${fmtRate(r.vol_target)} a year per asset, ${sizing}, each leg at most ` +
+        `${fmtMultiple(r.max_leverage, 1)} / ${r.tickers.length} (gross at most ${fmtMultiple(r.max_leverage, 1)})`,
+    )
+  } else {
+    lines.push(
+      r.vol_target === null
+        ? 'Vol targeting: off'
+        : `Vol targeting: ${fmtRate(r.vol_target)} annual target, ${sizing}, ${fmtMultiple(r.max_leverage, 1)} max leverage`,
+    )
+  }
+  return lines
 }
 
 // ---------------------------------------------------------------- trades table
@@ -184,8 +274,8 @@ export function lookbackLabel(L: number): string {
 }
 
 /**
- * Rows = L and columns = z_entry for mean reversion and pairs. Trend has no z_entry axis, so its
- * one-column matrix is shown as a single row over L (§13).
+ * Rows = L and columns = z_entry for mean reversion and pairs. Trend and the trend portfolio have
+ * no z_entry axis, so their one-column matrix is shown as a single row over L (§13).
  */
 export function heatmapLayout(resp: SensitivityResponse): HeatLayout {
   const { selected } = resp
@@ -247,6 +337,16 @@ export function fanRows(model: ModelResult): FanRow[] {
     p95: p95[t],
     paths: model.sample_paths.map((path) => path[t]),
   }))
+}
+
+/**
+ * The block lengths a Monte Carlo run used (§10.8): the requested one for both bootstraps, or the
+ * automatic estimates. The stationary bootstrap's length is the mean of its random block lengths.
+ */
+export function blockLengthLabel(r: MonteCarloResponse['resolved']): string {
+  const { circular, stationary } = r.block_len_used
+  if (r.block_len === 'auto') return `auto: ${fmtDayCount(circular)} circular, mean ${fmtDayCount(stationary)} stationary`
+  return `${fmtDayCount(circular)} (the stationary bootstrap's mean)`
 }
 
 export type HistRow = {
@@ -356,4 +456,99 @@ export function calendarGrid(cal: CalendarReturns): { years: CalendarYear[]; bou
   }
   const bound = Math.max(0.02, ...cal.monthly.map((m) => Math.abs(m.strategy)))
   return { years: [...years.values()].sort((a, b) => a.year - b.year), bound }
+}
+
+// ---------------------------------------------------------------- walk-forward (§9.2)
+
+export type WalkForwardRow = {
+  date: string
+  equity: number | null // the stitched walk-forward
+  fixed: number | null // the request's own configuration over the same days
+  benchmark: number | null
+  fold: number | null // the fold that owns the day; null on the baseline
+}
+
+/** One row per walk-forward series date, nulls included, like seriesRows. */
+export function walkForwardRows(series: WalkForwardSeries): WalkForwardRow[] {
+  const n = series.dates.length
+  const arrays = [series.equity, series.fixed_equity, series.benchmark_equity, series.fold]
+  if (arrays.some((a) => a.length !== n)) throw new Error('The walk-forward series arrays have different lengths.')
+  return series.dates.map((date, i) => ({
+    date,
+    equity: series.equity[i],
+    fixed: series.fixed_equity[i],
+    benchmark: series.benchmark_equity[i],
+    fold: series.fold[i],
+  }))
+}
+
+export type FoldBand = { fold: number; x1: string; x2: string }
+
+/**
+ * The first and last date of every odd-numbered fold (1, 3, ...): the chart shades alternate test
+ * folds (§13, view 11), so each boundary between folds is visible.
+ */
+export function foldBands(series: WalkForwardSeries): FoldBand[] {
+  const bands: FoldBand[] = []
+  series.fold.forEach((fold, i) => {
+    if (fold === null) return
+    const last = bands.at(-1)
+    if (last?.fold === fold) last.x2 = series.dates[i]
+    else bands.push({ fold, x1: series.dates[i], x2: series.dates[i] })
+  })
+  return bands.filter((band) => band.fold % 2 === 1)
+}
+
+/** "L 60 · z 2.0" for mean reversion and pairs, "L 252 (12m)" for the trend strategies, "flat" for no choice. */
+export function configLabel(cell: GridCell | null): string {
+  if (cell === null) return 'flat'
+  return cell.z_entry === null ? `L ${lookbackLabel(cell.L)}` : `L ${cell.L} · ${zEntryLabel(cell.z_entry)}`
+}
+
+/** Whether each fold chose differently from the fold before it. A flat fold counts as a choice. */
+export function selectionChanges(folds: readonly Fold[]): boolean[] {
+  const same = (a: GridCell | null, b: GridCell | null) =>
+    a === null || b === null ? a === b : a.L === b.L && a.z_entry === b.z_entry
+  return folds.map((fold, i) => i > 0 && !same(fold.selected, folds[i - 1].selected))
+}
+
+// ---------------------------------------------------------------- log-scale equity axis (§13 view 2)
+
+export type LogAxis = { domain: [number, number]; ticks: number[] }
+
+const LOG_MANTISSAS = [1, 2, 5] as const
+const MAX_LOG_TICKS = 9
+
+/**
+ * A log axis for values in [lo, hi] (both > 0). The domain is widened to the nearest 1, 2 or 5 × 10^k
+ * at or beyond each end, and the ticks are every such value inside it, so there are always at least
+ * two. Over many decades, where that would crowd the axis, only the powers of ten are kept.
+ * Returns null when lo or hi is not positive and finite: a log axis can't show 0 (a ruined run).
+ */
+export function logAxis(lo: number, hi: number): LogAxis | null {
+  if (!(lo > 0) || !(hi >= lo) || !Number.isFinite(hi)) return null
+  const values: number[] = []
+  for (let k = Math.floor(Math.log10(lo)) - 1; k <= Math.ceil(Math.log10(hi)) + 1; k += 1) {
+    for (const m of LOG_MANTISSAS) values.push(Number((m * 10 ** k).toPrecision(12)))
+  }
+  const lower = values.findLast((v) => v <= lo) as number
+  let upper = values.find((v) => v >= hi) as number
+  if (upper === lower) upper = values[values.indexOf(lower) + 1] // a flat series still gets two ticks
+  let ticks = values.filter((v) => v >= lower && v <= upper)
+  if (ticks.length > MAX_LOG_TICKS) ticks = ticks.filter((v) => v.toExponential().startsWith('1e'))
+  return { domain: [lower, upper], ticks }
+}
+
+/** The log axis for the equity chart: the strategy's equity, and the benchmark's while it is shown. */
+export function equityLogAxis(rows: readonly SeriesRow[], withBenchmark: boolean): LogAxis | null {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const r of rows) {
+    for (const v of withBenchmark ? [r.equity, r.benchmark] : [r.equity]) {
+      if (v === null) continue
+      lo = Math.min(lo, v)
+      hi = Math.max(hi, v)
+    }
+  }
+  return lo === Infinity ? null : logAxis(lo, hi)
 }

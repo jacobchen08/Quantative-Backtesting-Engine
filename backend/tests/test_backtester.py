@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import date
 
 import numpy as np
@@ -11,8 +11,10 @@ import pytest
 
 from app.services import metrics
 from app.services.backtester import BacktestResult, InsufficientDataError, resolve_split, run_backtest
-from app.services.monte_carlo import MonteCarloInputError
-from app.services.pipeline import StrategyParams, StrategyRun, build_report, run_strategy, strategy_mc_returns
+from app.services.monte_carlo import MonteCarloInputError, strategy_returns
+from app.services.pipeline import StrategyParams, StrategyRun, run_strategy
+from app.services.report import build_report
+from app.services.walk_forward import WalkForwardResult, run_walk_forward
 
 OVERLAYS = [None, "daily", "weekly", "monthly"]
 
@@ -25,64 +27,117 @@ BASE_CONFIGS = [
     ("trend-monthly", {"strategy": "trend", "tickers": ("X",), "L": 126, "signal_frequency": "monthly"}),
     ("trend-daily", {"strategy": "trend", "tickers": ("X",), "L": 126, "signal_frequency": "daily"}),
 ]
-PERTURBATION_CASES = [
-    pytest.param(
-        {
-            **cfg,
-            "execution_lag": i % 3,
-            "vol_target": None if vol is None else 0.10,
-            "vol_refresh": vol or "weekly",
-        },
-        id=f"{name}-{vol or 'no-overlay'}-k{i % 3}",
-    )
-    for i, (name, cfg, vol) in enumerate((n, c, v) for n, c in BASE_CONFIGS for v in OVERLAYS)
-] + [
-    pytest.param({**dict(BASE_CONFIGS)[base], **extra}, id=name)
-    for name, base, extra in [
-        ("mean-reversion-long-only-k1", "mean-reversion", {"allow_short": False, "execution_lag": 1}),
-        (
-            "trend-daily-long-only-weekly-k2",
-            "trend-daily",
-            {"allow_short": False, "execution_lag": 2, "vol_target": 0.10, "vol_refresh": "weekly"},
-        ),
-        ("pairs-fixed-borrow-300bps-k1", "pairs-fixed", {"borrow_bps": 300.0, "execution_lag": 1}),
-        (
-            "mean-reversion-borrow-500bps-daily-k0",
-            "mean-reversion",
-            {"borrow_bps": 500.0, "execution_lag": 0, "vol_target": 0.10, "vol_refresh": "daily"},
-        ),
+PERTURBATION_CASES = (
+    [
+        pytest.param(
+            {
+                **cfg,
+                "execution_lag": i % 3,
+                "vol_target": None if vol is None else 0.10,
+                "vol_refresh": vol or "weekly",
+            },
+            id=f"{name}-{vol or 'no-overlay'}-k{i % 3}",
+        )
+        for i, (name, cfg, vol) in enumerate((n, c, v) for n, c in BASE_CONFIGS for v in OVERLAYS)
     ]
-]
+    + [
+        pytest.param({**dict(BASE_CONFIGS)[base], **extra}, id=name)
+        for name, base, extra in [
+            ("mean-reversion-long-only-k1", "mean-reversion", {"allow_short": False, "execution_lag": 1}),
+            (
+                "trend-daily-long-only-weekly-k2",
+                "trend-daily",
+                {"allow_short": False, "execution_lag": 2, "vol_target": 0.10, "vol_refresh": "weekly"},
+            ),
+            ("pairs-fixed-borrow-300bps-k1", "pairs-fixed", {"borrow_bps": 300.0, "execution_lag": 1}),
+            (
+                "mean-reversion-borrow-500bps-daily-k0",
+                "mean-reversion",
+                {"borrow_bps": 500.0, "execution_lag": 0, "vol_target": 0.10, "vol_refresh": "daily"},
+            ),
+            # The Kalman model and the trend portfolio.
+            ("pairs-kalman-fixed-k1", "pairs-fixed", {"pairs_model": "kalman", "execution_lag": 1}),
+            (
+                "pairs-kalman-rolling-weekly-k2",
+                "pairs-rolling",
+                {"pairs_model": "kalman", "kalman_delta": 1e-5, "execution_lag": 2, "vol_target": 0.10},
+            ),
+        ]
+    ]
+    + [
+        pytest.param(
+            {
+                "strategy": "trend_portfolio",
+                "tickers": ("T08", "T15", "T20", "T30"),
+                "L": 126,
+                "vol_target": 0.40,
+                **extra,
+            },
+            id=name,
+        )
+        for name, extra in [
+            ("trend-portfolio-monthly-weekly-k1", {"signal_frequency": "monthly", "vol_refresh": "weekly"}),
+            (
+                "trend-portfolio-daily-daily-k0",
+                {"signal_frequency": "daily", "vol_refresh": "daily", "execution_lag": 0},
+            ),
+            (
+                "trend-portfolio-monthly-long-only-borrow-k2",
+                {"vol_refresh": "monthly", "execution_lag": 2, "allow_short": False, "borrow_bps": 300.0},
+            ),
+        ]
+    ]
+)
 CUTS = (300, 480, 655, 870)
 
 
 def _outputs(run: StrategyRun) -> dict[str, pd.Series | pd.DataFrame]:
     out = {
-        "score": run.score,
         "signal": run.signal,
         "weights": run.weights,
         "pos": run.backtest.pos,
         "excess": run.backtest.excess,
         "total": run.backtest.total,
     }
-    for name in ("vol_forecast", "beta", "beta_used"):
+    for name in (
+        "score",
+        "vol_forecast",
+        "beta",
+        "beta_used",
+        "leg_scores",
+        "leg_signals",
+        "leg_vol_forecasts",
+    ):
         if getattr(run, name) is not None:
             out[name] = getattr(run, name)
+    if run.backtest.leg_pos is not None:
+        out["leg_pos"] = run.backtest.leg_pos
     return out
 
 
+def _perturb_after(
+    prices: pd.DataFrame, rf: pd.Series, cut: int, rng: np.random.Generator
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Prices and rf multiplied by random lognormal noise on every date strictly after position cut."""
+    future = slice(cut + 1, None)
+    noisy = prices.copy()
+    noisy.iloc[future] *= np.exp(rng.normal(0.0, 0.05, noisy.iloc[future].shape))
+    noisy_rf = rf.copy()
+    noisy_rf.iloc[future] *= np.exp(rng.normal(0.0, 0.2, len(rf) - cut - 1))
+    return noisy, noisy_rf
+
+
 @pytest.mark.parametrize("config", PERTURBATION_CASES)
-def test_no_lookahead_under_future_perturbation(prices: pd.DataFrame, varying_rf, config: dict) -> None:
+def test_no_lookahead_under_future_perturbation(
+    portfolio_prices: pd.DataFrame, varying_rf, config: dict
+) -> None:
+    prices = portfolio_prices
     params = StrategyParams(**config)
     rf = varying_rf(prices.index)
     base = _outputs(run_strategy(prices, rf, params))
     rng = np.random.default_rng(99)
     for cut in CUTS:
-        future = slice(cut + 1, None)
-        noisy = prices.copy()
-        noisy.iloc[future] *= np.exp(rng.normal(0.0, 0.05, noisy.iloc[future].shape))
-        noisy_rf = rf.copy()
-        noisy_rf.iloc[future] *= np.exp(rng.normal(0.0, 0.2, len(rf) - cut - 1))
+        noisy, noisy_rf = _perturb_after(prices, rf, cut, rng)
         pert = _outputs(run_strategy(noisy, noisy_rf, params))
         assert pert.keys() == base.keys()
         for name, a in base.items():
@@ -90,9 +145,67 @@ def test_no_lookahead_under_future_perturbation(prices: pd.DataFrame, varying_rf
                 a.iloc[: cut + 1].to_numpy(), pert[name].iloc[: cut + 1].to_numpy(), equal_nan=True
             )
             assert same, f"{name} changed on or before the cut at {cut}"
-        for name in ("score", "total"):  # the perturbation did reach the later dates
+        # The perturbation did reach the later dates.
+        for name in ("score" if "score" in base else "leg_scores", "total"):
             after_a, after_b = base[name].iloc[cut + 1 :].to_numpy(), pert[name].iloc[cut + 1 :].to_numpy()
             assert not np.array_equal(after_a, after_b, equal_nan=True)
+
+
+# The walk-forward's stitched series (§9.2), where "excess" is the stitched excess. Small grids:
+# the stitching and the switch timing are the same for any grid.
+WALK_FORWARD_CASES = [
+    pytest.param(
+        {"strategy": "pairs", "tickers": ("Y", "X"), "L": 60, "borrow_bps": 200.0},
+        {"L_values": (20, 60, 120), "z_entry_values": (1.5, 2.5)},
+        id="pairs-borrow-k1",
+    ),
+    pytest.param(
+        {
+            "strategy": "trend",
+            "tickers": ("X",),
+            "L": 63,
+            "signal_frequency": "daily",
+            "execution_lag": 2,
+            "vol_target": 0.10,
+            "vol_refresh": "daily",
+        },
+        {"L_values": (21, 63, 126)},
+        id="trend-daily-overlay-k2",
+    ),
+]
+
+
+@pytest.mark.parametrize("config, grid", WALK_FORWARD_CASES)
+def test_no_lookahead_in_the_walk_forward_stitched_series(
+    prices: pd.DataFrame, varying_rf, config: dict, grid: dict
+) -> None:
+    params = StrategyParams(**config)
+    rf = varying_rf(prices.index)
+    windows = {**grid, "train_days": 252, "test_days": 63}
+    base = run_walk_forward(prices, rf, params, **windows)
+    assert base.n_distinct_selected >= 2  # some fold switches configuration
+    starts = [prices.index.get_loc(fold.test_start) for fold in base.folds]
+    # The close before a switch, a switch close itself (b_j - 1), inside a fold, and in the last fold.
+    cuts = (starts[1] - 2, starts[2] - 1, starts[3] + 30, starts[-1] + 10)
+
+    def stitched(res: WalkForwardResult) -> dict[str, np.ndarray]:
+        return {
+            "weights": res.weights.to_numpy(),
+            "excess": res.daily.excess.to_numpy(),
+            "total": res.daily.total.to_numpy(),
+        }
+
+    rng = np.random.default_rng(99)
+    for cut in cuts:
+        noisy, noisy_rf = _perturb_after(prices, rf, cut, rng)
+        pert = run_walk_forward(noisy, noisy_rf, params, **windows)
+        a, b = stitched(base), stitched(pert)
+        for name in a:
+            assert np.array_equal(a[name][: cut + 1], b[name][: cut + 1]), (
+                f"{name} changed on or before {cut}"
+            )
+        after = slice(cut + 1, base.stop)  # the perturbation did reach the later stitched days
+        assert not np.array_equal(a["excess"][after], b["excess"][after])
 
 
 # ---------------------------------------------------------------- 2. hand-computed toy cases
@@ -234,6 +347,194 @@ def test_trade_pnl_reconciles_with_excess_returns(synthetic_prices, varying_rf) 
             runs += 1
     assert runs >= 100 and resized > 0 and borrowed >= 30
     assert worst < 1e-9
+
+
+def test_per_leg_trades_reconcile_and_never_overlap(synthetic_prices, universe, varying_rf) -> None:
+    """§12 item 12: the trend portfolio's leg trades over at least 50 random runs."""
+    rng = np.random.default_rng(77)
+    worst, runs, flips, resized = 0.0, 0, 0, 0
+    pool = ["T08", "T15", "T20", "T30", "X", "SPY"]
+    for _ in range(54):
+        base = synthetic_prices(n=int(rng.integers(700, 1000)), seed=int(rng.integers(10**9)))
+        prices = base.join(universe(base.index, seed=int(rng.integers(10**9))))
+        rf = varying_rf(prices.index, seed=int(rng.integers(10**9)))
+        legs = tuple(rng.choice(pool, size=int(rng.integers(2, 6)), replace=False))
+        params = StrategyParams(
+            strategy="trend_portfolio",
+            tickers=legs,
+            L=int(rng.choice([21, 42, 63, 126])),
+            signal_frequency=str(rng.choice(["daily", "monthly"])),
+            execution_lag=int(rng.integers(0, 3)),
+            cost_bps=float(rng.uniform(0.0, 30.0)),
+            borrow_bps=float(rng.choice([0.0, rng.uniform(0.0, 2000.0)])),
+            allow_short=bool(rng.random() < 0.75),
+            vol_target=float(rng.uniform(0.05, 0.6)),
+            vol_halflife=int(rng.choice([5, 21, 42])),
+            vol_refresh=str(rng.choice(["daily", "weekly", "monthly"])),
+            max_leverage=float(rng.uniform(1.0, 4.0)),
+        )
+        bt = run_strategy(prices, rf, params).backtest
+        worst = max(worst, abs(bt.pnl.sum() - bt.excess.iloc[bt.e : bt.stop].sum()))
+        trades = bt.trades
+        assert set(trades["ticker"]) <= set(legs) and trades["ticker"].notna().all()
+        assert trades["id"].tolist() == list(range(1, len(trades) + 1))
+        order = trades.sort_values(["entry_date", "ticker"], kind="stable")["id"].tolist()
+        assert order == trades["id"].tolist()  # numbered by entry date, then ticker
+        for leg, leg_trades in trades.groupby("ticker"):
+            leg_trades = leg_trades.sort_values("entry_date")
+            exits = leg_trades["exit_date"].iloc[:-1].to_numpy()
+            entries = leg_trades["entry_date"].iloc[1:].to_numpy()
+            assert not leg_trades["open"].iloc[:-1].any()  # only a leg's last trade can be open
+            assert (entries >= exits).all(), leg  # no two trades of a leg are held at once
+            flips += int((entries == exits).sum())
+            # The leg's held_id days are exactly its trades': the counts and the last held days.
+            held = bt.held_id[leg].iloc[: bt.stop].dropna()
+            days = held.index.to_series().groupby(held.to_numpy())
+            ids = leg_trades["id"].to_numpy()
+            assert np.array_equal(
+                days.size().reindex(ids, fill_value=0).to_numpy(), leg_trades["holding_days"]
+            )
+            first = days.first().reindex(ids)
+            assert (
+                first.dropna().to_numpy() > leg_trades["entry_date"].to_numpy()[first.notna().to_numpy()]
+            ).all()
+            closed = ~leg_trades["open"].to_numpy()
+            assert np.array_equal(
+                days.last().reindex(ids).to_numpy()[closed], leg_trades["exit_date"].to_numpy()[closed]
+            )
+        resized += int((bt.turnover[bt.held] > 0).sum())
+        runs += 1
+    assert runs >= 50 and flips > 0 and resized > 0
+    assert worst < 1e-9
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"strategy": "pairs", "tickers": ("Y", "X"), "L": 60, "vol_target": 0.10, "execution_lag": 2},
+        {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40, "allow_short": False, "borrow_bps": 200.0},
+        {"strategy": "trend_portfolio", "tickers": ("T08", "T15", "T20"), "L": 126, "vol_target": 0.40},
+    ],
+    ids=["pairs", "mean-reversion", "trend-portfolio"],
+)
+def test_skipping_the_trade_bookkeeping_changes_nothing_else(
+    portfolio_prices: pd.DataFrame, varying_rf, config: dict
+) -> None:
+    """The parameter grids run without the trade bookkeeping (trades=False): the trade fields are
+    None and every other field of the backtest is exactly as in a full run."""
+    rf = varying_rf(portfolio_prices.index)
+    params = StrategyParams(**config)
+    full = run_strategy(portfolio_prices, rf, params).backtest
+    lean = run_strategy(portfolio_prices, rf, params, trades=False).backtest
+    trade_fields = ("trade_id", "held_id", "pnl", "trades")
+    assert all(getattr(lean, name) is None for name in trade_fields)
+    assert len(full.trades) > 0
+    for field in fields(BacktestResult):
+        if field.name in trade_fields:
+            continue
+        a, b = getattr(full, field.name), getattr(lean, field.name)
+        if isinstance(a, pd.Series):
+            pd.testing.assert_series_equal(a, b, check_exact=True)
+        elif isinstance(a, pd.DataFrame):
+            pd.testing.assert_frame_equal(a, b, check_exact=True)
+        else:
+            assert a == b, field.name
+
+
+@pytest.mark.parametrize("k, borrow, allow_short", [(0, 0.0, True), (1, 400.0, True), (2, 0.0, False)])
+def test_each_legs_trades_are_those_of_that_leg_backtested_alone(
+    portfolio_prices: pd.DataFrame, varying_rf, k: int, borrow: float, allow_short: bool
+) -> None:
+    """§7.4: identification, attribution and bookkeeping run leg by leg, so each leg's trades are
+    exactly what §7 gives for that leg alone, holding its weights (with the portfolio's ids)."""
+    rf = varying_rf(portfolio_prices.index)
+    params = StrategyParams(
+        strategy="trend_portfolio",
+        tickers=("T08", "T15", "T20", "T30"),
+        L=21,
+        signal_frequency="daily",
+        vol_target=0.30,
+        vol_refresh="weekly",
+        execution_lag=k,
+        cost_bps=12.0,
+        borrow_bps=borrow,
+        allow_short=allow_short,
+    )
+    run = run_strategy(portfolio_prices, rf, params)
+    bt = run.backtest
+    assert bt.held.equals((bt.w.shift(1).fillna(0.0).abs().sum(axis=1) > 0).rename("held"))  # any leg held
+    if not allow_short:  # long-only legs go flat on their own, so "any leg held" differs from "every leg"
+        assert (bt.held & bt.held_id.isna().any(axis=1)).any()
+    columns = ["side", "segment", "open", "signal_date", "entry_date", "exit_signal_date", "exit_date"]
+    flips = 0
+    for leg in params.tickers:
+        alone = run_backtest(
+            R=run.returns[[leg]],
+            W=run.weights[[leg]],
+            s=run.leg_signals[leg],
+            rf=rf,
+            t0=run.t0,
+            k=k,
+            cost_bps=12.0,
+            borrow_bps=borrow,
+            E0=1.0,
+            split_date=bt.split_date,
+        ).trades
+        mine = bt.trades.loc[bt.trades["ticker"] == leg].reset_index(drop=True)
+        assert len(mine) == len(alone) > 5
+        assert mine[[*columns, "holding_days"]].equals(alone[[*columns, "holding_days"]]), leg
+        np.testing.assert_allclose(mine["pnl"].to_numpy(), alone["pnl"].to_numpy(), rtol=0, atol=1e-15)
+        flips += int(
+            (alone["entry_date"].iloc[1:].to_numpy() == alone["exit_date"].iloc[:-1].to_numpy()).sum()
+        )
+    assert (
+        flips > 0 or not allow_short
+    )  # a flip's cost is split between its trades (§7.1); none when long-only
+
+
+def test_a_ruin_day_credit_is_split_by_gross_weight() -> None:
+    """Two trend-portfolio legs held into a crash that ruins the run: the clipped amount is
+    credited to each leg's open trade in proportion to its gross weight (approved, §6.2)."""
+    n, crash = 800, 600
+    g = np.random.default_rng(3)
+    idx = pd.bdate_range("2018-01-01", periods=n).as_unit("ns")
+    calm = g.normal(0.001, 0.005, n)  # sigma about 8% a year: 0.6 / sigma is capped at 4
+    rough = g.normal(0.002, 0.02, n)  # about 32% a year: below the cap
+    calm[crash] = rough[crash] = np.log(0.5)
+    prices = pd.DataFrame(
+        {"A": 100 * np.exp(np.cumsum(calm)), "B": 100 * np.exp(np.cumsum(rough))}, index=idx
+    )
+    prices["SPY"] = prices["A"]
+    rf = pd.Series(0.02 / 252, index=idx)
+    params = StrategyParams(
+        strategy="trend_portfolio",
+        tickers=("A", "B"),
+        L=252,
+        signal_frequency="daily",
+        vol_target=0.6,
+        max_leverage=4.0,
+        vol_refresh="daily",
+        cost_bps=5.0,
+        borrow_bps=0.0,
+    )
+    run = run_strategy(prices, rf, params)
+    bt = run.backtest
+    assert bt.ruined and bt.ruin_date == idx[crash] and bt.total.iloc[crash] == -1.0
+    held_into = bt.w.iloc[crash - 1]
+    assert held_into["A"] == 2.0 and 0.5 < held_into["B"] < 1.5  # A at its cap of 4 / 2, B below
+    # Each leg's unclipped daily contribution; leg i's trades together earn these plus its credit.
+    w_prev, R = bt.w.shift(1).fillna(0.0), run.returns[["A", "B"]].fillna(0.0)
+    contrib = w_prev.mul(R.sub(rf, axis=0)) - 5e-4 * (bt.w - w_prev).abs()
+    window = slice(bt.e, bt.stop)
+    unclipped = contrib.iloc[crash].sum()
+    credit = bt.excess.iloc[crash] - unclipped
+    assert credit > 0.4
+    for leg in ("A", "B"):
+        leg_pnl = bt.trades.loc[bt.trades["ticker"] == leg, "pnl"].sum()
+        credit_leg = leg_pnl - contrib[leg].iloc[window].sum()
+        assert credit_leg == pytest.approx(credit * held_into[leg] / held_into.sum(), rel=1e-12)
+    assert abs(bt.pnl.sum() - bt.excess.iloc[window].sum()) < 1e-12
+    assert bt.trades.groupby("ticker")["open"].last().all()  # both positions are open at r
 
 
 def test_open_trades_are_excluded_from_the_win_rate() -> None:
@@ -382,6 +683,7 @@ def test_backtester_input_validation() -> None:
         # Additions to the §6.1 list, which the trade bookkeeping relies on:
         "a weight on a flat day": {"W": pd.DataFrame({"A": [0, 1, 1, 0, 0.5, 0]}, index=DATES, dtype=float)},
         "a signal outside {-1, 0, 1}": {"s": s * 0.5, "W": (s * 0.5).to_frame("A")},
+        "a signal of 2": {"s": s * 2, "W": (s * 2).to_frame("A")},
         "a NaN return after the first row": {"R": R_nan},
     }
     for name, change in bad.items():
@@ -390,6 +692,38 @@ def test_backtester_input_validation() -> None:
             pytest.fail(f"accepted {name}")
     with pytest.raises(TypeError):
         run_backtest(**{**good, "rf": zero.to_numpy()})
+
+
+def test_per_leg_input_validation() -> None:
+    """The trend portfolio's extra checks (§5.8): leg signals in {-1, 0, 1}, no weight on a flat
+    leg, and s the invested flag those signals imply."""
+    legs = pd.DataFrame({"A": [0, 1, 1, 0, 0, 0], "B": [0, 0, -1, -1, 0, 0]}, index=DATES, dtype=float)
+    R = pd.concat([TOY_R, TOY_R.rename(columns={"A": "B"}) * -1], axis=1)
+    invested = legs.ne(0).any(axis=1).astype(float)
+    good = {
+        "R": R,
+        "W": legs / 2,
+        "s": invested,
+        "rf": pd.Series(0.0, index=DATES),
+        "t0": 1,
+        "k": 0,
+        "cost_bps": 10.0,
+        "borrow_bps": 0.0,
+        "E0": 1.0,
+        "split_date": DATES[4],
+        "leg_signals": legs,
+    }
+    run_backtest(**good)
+    on_flat_leg = (legs / 2).assign(B=[0, 0.5, -0.5, -0.5, 0, 0])  # B is flat on day 1
+    bad = {
+        "a weight on a flat leg": {"W": on_flat_leg},
+        "a leg signal of 2": {"leg_signals": legs * 2, "W": legs},
+        "s that is not the invested flag": {"s": invested.shift(1, fill_value=0.0)},
+    }
+    for name, change in bad.items():
+        with pytest.raises(ValueError):
+            run_backtest(**{**good, **change})
+            pytest.fail(f"accepted {name}")
 
 
 @pytest.mark.parametrize("n", [650, 880, 1000])
@@ -482,7 +816,7 @@ def test_ruin_in_sample_ends_the_window_and_nulls_oos() -> None:
     assert abs(bt.pnl.sum() - bt.excess.iloc[bt.e : bt.stop].sum()) < 1e-9
     for window in ("full", "is"):
         with pytest.raises(MonteCarloInputError, match="ruin day"):
-            strategy_mc_returns(run, window)
+            strategy_returns(run, window)
 
 
 def test_ruin_on_the_first_oos_day_leaves_a_one_day_segment() -> None:
@@ -500,10 +834,10 @@ def test_ruin_on_the_first_oos_day_leaves_a_one_day_segment() -> None:
     assert oos.total_return == -1.0 and oos.max_drawdown == -1.0
     bench = report.benchmark_metrics["oos"]
     assert bench.n_days == 1 and bench.ann_vol is None and bench.sharpe is None
-    R, exposed = strategy_mc_returns(run, "is")  # the IS window doesn't contain the ruin day
+    R, exposed = strategy_returns(run, "is")  # the IS window doesn't contain the ruin day
     assert exposed and len(R) == r - run.backtest.e
     with pytest.raises(MonteCarloInputError):
-        strategy_mc_returns(run, "full")
+        strategy_returns(run, "full")
 
 
 # ---------------------------------------------------------------- 10. pct_days_at_cap
@@ -547,7 +881,7 @@ def test_pct_days_at_cap_is_null_when_never_invested_or_overlay_off(
     assert build_report(run_strategy(prices, rf, replace(never, vol_target=None))).sizing is None
 
 
-# ---------------------------------------------------------------- 11. borrow fee (Phase 5)
+# ---------------------------------------------------------------- 11. borrow fee
 
 
 def test_a_constant_short_pays_exactly_the_borrow_fee() -> None:
@@ -592,11 +926,11 @@ def test_a_zero_borrow_fee_changes_nothing(prices: pd.DataFrame, varying_rf) -> 
     ):
         bt = run_strategy(prices, rf, params).backtest
         assert params.borrow_bps == 0.0 and (bt.borrow == 0.0).all()
-        # Bit for bit the formula before Phase 5: excess = gross_excess - cost.
+        # Bit for bit the formula without a borrow fee: excess = gross_excess - cost.
         assert np.array_equal(bt.excess.to_numpy(), (bt.gross_excess - bt.cost).to_numpy())
 
 
-# ---------------------------------------------------------------- 13. cost sweep and break-even (Phase 5)
+# ---------------------------------------------------------------- 13. cost sweep and break-even
 
 
 def segment_sharpe(bt: BacktestResult, bounds: tuple[int, int], excess: pd.Series) -> float | None:
@@ -698,7 +1032,7 @@ def test_a_cost_that_ruins_the_run_nulls_the_segments_from_its_ruin_day(
         assert (sweep.break_even_bps[name] is None) == (a <= ruin_day < b)  # -99.5% before costs: losing
 
 
-# ---------------------------------------------------------------- 14. rolling and calendar stats (Phase 5)
+# ---------------------------------------------------------------- 14. rolling and calendar stats
 
 
 @pytest.mark.parametrize("strategy, tickers", [("pairs", ("Y", "X")), ("trend", ("SPY",))])

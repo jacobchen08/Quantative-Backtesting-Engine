@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,13 +14,21 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from yfinance.exceptions import YFRateLimitError
 
 from app import __version__
+from app.database import Base, get_session, make_engine
 from app.main import app, diagnostics_cache
 from app.models import BacktestRun
-from app.schemas import BacktestResponse, MonteCarloResponse, SensitivityResponse
+from app.schemas import (
+    BacktestResponse,
+    MonteCarloResponse,
+    RunDetail,
+    RunSummary,
+    SensitivityResponse,
+    WalkForwardResponse,
+)
 from app.serialization import to_jsonable
 from app.services import stats
 
@@ -126,7 +136,7 @@ def test_backtest(client: TestClient, request_fields: dict) -> None:
     assert (out["sizing"] is not None) == ("vol_target" in request_fields)
     assert set(out["metrics"]) == set(out["benchmark_metrics"]) == {"is", "oos", "full"}
     assert out["trades"] and all(t["segment"] in ("is", "oos") for t in out["trades"])
-    # Phase 5: the borrow fee and long-only switch, the cost sweep, calendar and rolling statistics.
+    # The borrow fee and long-only switch, the cost sweep, calendar and rolling statistics.
     borrow, allow_short = request_fields.get("borrow_bps", 0.0), request_fields.get("allow_short", True)
     assert (resolved["borrow_bps"], resolved["allow_short"]) == (borrow, allow_short)
     assert (out["metrics"]["full"]["ann_borrow_drag"] > 0) == (borrow > 0 and allow_short)
@@ -162,6 +172,54 @@ def test_sensitivity(client: TestClient) -> None:
     assert (
         out["sharpe"][row][col] == best["sharpe"] == max(v for r in out["sharpe"] for v in r if v is not None)
     )
+
+
+def test_walk_forward(client: TestClient) -> None:
+    out = post(
+        client, "/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    WalkForwardResponse.model_validate(out)
+    resolved, folds, series = out["resolved"], out["folds"], out["series"]
+    assert (resolved["train_days"], resolved["test_days"], resolved["anchored"]) == (756, 63, False)
+    assert resolved["L_values"] == [20, 40, 60, 90, 120] and resolved["z_entry_values"] == [
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+    ]
+    assert resolved["split_date"] is None and resolved["borrow_bps"] == 0.0  # the request, as sent
+    assert out["n_configs"] == 20 and len(folds) == 2  # 1,000 days: s = 120 and b0 = 876, so two folds
+    assert 1 <= out["n_distinct_selected"] <= len(folds)
+    assert folds[0]["test_start"] < folds[0]["test_end"] < folds[1]["test_start"] <= folds[1]["test_end"]
+    assert folds[1]["train_start"] > folds[0]["train_start"]  # rolling
+    lengths = {name: len(values) for name, values in series.items()}
+    assert len(set(lengths.values())) == 1, lengths
+    assert series["fold"][0] is None and series["fold"][1] == 0 and series["fold"][-1] == 1
+    assert series["equity"][0] == series["fixed_equity"][0] == series["benchmark_equity"][0] == 100_000
+    assert series["dates"][-1] == folds[-1]["test_end"] and not out["ruined"]
+    m, fixed = out["metrics"], out["fixed_metrics"]
+    assert m["n_closed_trades"] is m["n_open_trades"] is m["win_rate"] is m["avg_holding_days"] is None
+    assert m["ann_turnover"] is not None and fixed["n_closed_trades"] is not None
+    assert m["n_days"] == fixed["n_days"] == out["benchmark_metrics"]["n_days"] == len(series["dates"]) - 1
+
+
+def test_walk_forward_for_trend_has_no_z_axis(client: TestClient) -> None:
+    request = {
+        "strategy": "trend",
+        "tickers": ["SPY"],
+        "start": START,
+        "end": END,
+        "z_entry_values": [2.0],  # ignored for trend
+        "train_days": 252,
+        "test_days": 126,
+        "anchored": True,
+    }
+    out = post(client, "/api/walk-forward", request)
+    WalkForwardResponse.model_validate(out)
+    assert out["resolved"]["z_entry_values"] is None and out["resolved"]["z_entry"] is None
+    assert out["resolved"]["L_values"] == [21, 63, 126, 252, 378] and out["n_configs"] == 5
+    assert len({f["train_start"] for f in out["folds"]}) == 1  # anchored: one common start
+    assert all(f["selected"] is None or f["selected"]["z_entry"] is None for f in out["folds"])
 
 
 @pytest.mark.parametrize(
@@ -229,6 +287,8 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         ),
         ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": 2001}, "borrow_bps"),
         ("/api/backtest", {"strategy": "mean_reversion", "tickers": ["Y"], "borrow_bps": -1}, "borrow_bps"),
+        ("/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "test_days": 20}, "test_days"),
+        ("/api/walk-forward", {"strategy": "pairs", "tickers": ["Y", "X"], "train_days": 251}, "train_days"),
     ],
     ids=[
         "z_exit>=z_entry",
@@ -245,14 +305,15 @@ def test_monte_carlo(client: TestClient, request_fields: dict) -> None:
         "pairs-long-only",
         "borrow-over-2000",
         "borrow-negative",
+        "walk-forward-test-days-20",
+        "walk-forward-train-days-251",
     ],
 )
 def test_invalid_requests_are_422_with_a_readable_detail(
     client: TestClient, path: str, payload: dict, phrase: str
 ) -> None:
-    dates = (
-        {"start": START, "end": END} if path == "/api/backtest" or payload.get("source") == "ticker" else {}
-    )
+    with_dates = path in ("/api/backtest", "/api/walk-forward") or payload.get("source") == "ticker"
+    dates = {"start": START, "end": END} if with_dates else {}
     out = post(client, path, {**dates, **payload}, status=422)
     assert isinstance(out["detail"], str) and phrase in out["detail"], out["detail"]
 
@@ -301,6 +362,9 @@ def test_only_backtests_are_stored(client: TestClient, db_engine: Engine) -> Non
     assert stored == {"metrics": out["metrics"], "benchmark_metrics": out["benchmark_metrics"]}
     post(client, "/api/sensitivity", request)
     post(client, "/api/monte-carlo", {"source": "strategy", "backtest": request, **SMALL_MC})
+    post(
+        client, "/api/walk-forward", {**request, "L_values": [60], "z_entry_values": [2.0], "train_days": 252}
+    )
     assert count_runs(db_engine) == 1
 
 
@@ -439,7 +503,7 @@ def test_a_one_day_oos_segment_after_ruin_still_validates(
     assert out["calendar"]["monthly"][-1]["partial"] and out["calendar"]["annual"][-1]["partial"]
 
 
-# ---------------------------------------------------------------- Phase 5: a zero borrow fee is the default
+# ---------------------------------------------------------------- a zero borrow fee is the default
 
 
 def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
@@ -448,3 +512,285 @@ def test_a_zero_borrow_fee_is_the_default(client: TestClient) -> None:
     explicit = post(client, "/api/backtest", {**request, "borrow_bps": 0, "allow_short": True})
     assert implicit["resolved"]["borrow_bps"] == 0.0 and implicit["resolved"]["allow_short"] is True
     assert {**implicit, "run_id": None} == {**explicit, "run_id": None}
+
+
+# ---------------------------------------------------------------- Kalman pairs and the trend portfolio
+
+PORTFOLIO = ["T08", "T15", "T20", "T30"]
+
+
+def test_trend_portfolio_backtest(client: TestClient) -> None:
+    request = {
+        "strategy": "trend_portfolio",
+        "tickers": [t.lower() for t in PORTFOLIO],
+        "start": START,
+        "end": END,
+    }
+    out = post(client, "/api/backtest", {**request, "L": 126})
+    BacktestResponse.model_validate(out)
+    resolved, series = out["resolved"], out["series"]
+    assert resolved["tickers"] == PORTFOLIO and resolved["vol_target"] == 0.40  # null -> 0.40 per asset
+    assert (
+        resolved["vol_halflife"] == 42
+        and resolved["vol_refresh"] == "weekly"
+        and resolved["max_leverage"] == 2.0
+    )
+    assert resolved["z_entry"] is resolved["pairs_model"] is resolved["kalman_delta"] is None
+    assert series["score"] is None and series["vol_forecast"] is None and out["diagnostics"] is None
+    assert [leg["ticker"] for leg in series["legs"]] == PORTFOLIO
+    n = len(series["dates"])
+    for leg in series["legs"]:
+        assert all(len(leg[name]) == n for name in ("score", "position", "weight", "vol_forecast"))
+    gross = [sum(abs(leg["weight"][i]) for leg in series["legs"]) for i in range(n)]
+    assert gross == pytest.approx(series["gross_exposure"], abs=1e-15) and max(gross) <= 2.0 + 1e-12
+    for leg in series["legs"]:  # executed position and weight agree; the forecast is a volatility
+        assert all(
+            (p > 0) == (w > 0) and (p < 0) == (w < 0)
+            for p, w in zip(leg["position"], leg["weight"], strict=True)
+        )
+        assert all(v > 0 for v in leg["vol_forecast"] if v is not None)
+    assert any(
+        s < 0 for leg in series["legs"] for s in leg["score"] if s is not None
+    )  # a trailing excess return
+    assert set(series["position"]) <= {0.0, 1.0}  # the invested flag
+    trades = out["trades"]
+    assert (
+        trades
+        and {t["ticker"] for t in trades} <= set(PORTFOLIO)
+        and all(t["beta_at_entry"] is None for t in trades)
+    )
+    assert [t["id"] for t in trades] == list(range(1, len(trades) + 1))
+    sizing = out["sizing"]
+    assert sizing["vol_target"] == 0.40 and 0 <= sizing["pct_days_at_cap"] <= 1
+    # Per asset, 40% / 8% and 40% / 15% exceed the cap of 2 (0.5 per leg): legs sit at their cap.
+    cap_warnings = [w for w in out["warnings"] if "not reachable within max_leverage" in w]
+    assert sizing["pct_days_at_cap"] > 0.25 and len(cap_warnings) == 1
+    assert "invested asset-days" in cap_warnings[0] and "max_leverage / N" in cap_warnings[0]
+    assert out["metrics"]["full"]["n_closed_trades"] + out["metrics"]["full"]["n_open_trades"] == len(trades)
+    assert out["benchmark_metrics"]["full"]["pct_days_in_market"] == 1.0
+    # The trend grid: one column over L, no z_entry axis.
+    grid = post(client, "/api/sensitivity", {**request, "L_values": [63, 126], "z_entry_values": [2.0]})
+    SensitivityResponse.model_validate(grid)
+    assert grid["z_entry_values"] is None and [len(row) for row in grid["sharpe"]] == [1, 1]
+    wf = post(
+        client, "/api/walk-forward", {**request, "L_values": [63, 126], "train_days": 252, "test_days": 126}
+    )
+    WalkForwardResponse.model_validate(wf)
+    assert wf["resolved"]["z_entry_values"] is None and wf["n_configs"] == 2
+
+
+@pytest.mark.parametrize(
+    "payload, phrase",
+    [
+        ({"strategy": "trend_portfolio", "tickers": ["T08"]}, "trend_portfolio needs 2 to 12 tickers, got 1"),
+        (
+            {"strategy": "trend_portfolio", "tickers": [f"A{i}" for i in range(13)]},
+            "trend_portfolio needs 2 to 12 tickers, got 13",
+        ),
+        ({"strategy": "trend_portfolio", "tickers": ["T08", "t08"]}, "distinct"),
+        ({"strategy": "trend_portfolio", "tickers": PORTFOLIO, "vol_target": 0.04}, "0.05 and 0.6"),
+        ({"strategy": "trend", "tickers": ["SPY"], "vol_target": 0.55}, "0.01 and 0.5"),
+        (
+            {"strategy": "pairs", "tickers": ["Y", "X"], "pairs_model": "kalman", "kalman_delta": 0.5},
+            "kalman_delta",
+        ),
+    ],
+    ids=["one-ticker", "thirteen-tickers", "duplicate", "portfolio-target", "trend-target", "kalman-delta"],
+)
+def test_phase7_validation(client: TestClient, payload: dict, phrase: str) -> None:
+    out = post(client, "/api/backtest", {**payload, "start": START, "end": END}, status=422)
+    assert phrase in out["detail"], out["detail"]
+
+
+def test_kalman_pairs_and_its_ignored_delta(client: TestClient) -> None:
+    base = {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    kalman = post(client, "/api/backtest", {**base, "pairs_model": "kalman"})
+    BacktestResponse.model_validate(kalman)
+    assert kalman["resolved"]["pairs_model"] == "kalman" and kalman["resolved"]["kalman_delta"] == 1e-6
+    assert (
+        kalman["trades"] and kalman["diagnostics"] is not None
+    )  # the diagnostics test the pair, not the model
+    ols = post(client, "/api/backtest", {**base, "kalman_delta": 0.5})  # out of range, but ignored with "ols"
+    assert ols["resolved"]["pairs_model"] == "ols" and ols["resolved"]["kalman_delta"] is None
+    assert kalman["series"]["beta"] != ols["series"]["beta"]
+    trend = post(
+        client,
+        "/api/backtest",
+        {
+            "strategy": "trend",
+            "tickers": ["SPY"],
+            "start": START,
+            "end": END,
+            "pairs_model": "kalman",
+            "kalman_delta": 1e-3,
+        },
+    )
+    assert trend["resolved"]["pairs_model"] is None and trend["resolved"]["kalman_delta"] is None
+
+
+def test_monte_carlo_with_automatic_block_length(client: TestClient) -> None:
+    request = {"source": "ticker", "ticker": "SPY", "start": START, "end": END, "seed": 3, **SMALL_MC}
+    auto = post(client, "/api/monte-carlo", {**request, "block_len": "auto"})
+    MonteCarloResponse.model_validate(auto)
+    used = auto["resolved"]["block_len_used"]
+    assert auto["resolved"]["block_len"] == "auto"
+    assert 1 <= used["stationary"] <= used["circular"] <= 63
+    fixed = post(client, "/api/monte-carlo", {**request, "block_len": 12})
+    assert fixed["resolved"]["block_len_used"] == {"circular": 12, "stationary": 12}
+    for model in ("gbm", "bootstrap", "stationary"):
+        assert sum(fixed[model]["hist_counts"]) == 1000 and len(fixed[model]["sample_paths"]) == 20
+    for bad in ("automatic", 0, 64):
+        assert (
+            "block_len"
+            in post(client, "/api/monte-carlo", {**request, "block_len": bad}, status=422)["detail"]
+        )
+
+
+# ---------------------------------------------------------------- run history (§11.4)
+
+
+def test_runs_are_listed_newest_first_and_honour_limit(client: TestClient) -> None:
+    base = {"start": START, "end": END}
+    ids = [
+        post(client, "/api/backtest", {**base, "strategy": "pairs", "tickers": ["Y", "X"]})["run_id"],
+        post(client, "/api/backtest", {**base, "strategy": "trend", "tickers": ["SPY"]})["run_id"],
+        post(client, "/api/backtest", {**base, "strategy": "mean_reversion", "tickers": ["Y"]})["run_id"],
+    ]
+    runs = parse(client.get("/api/runs"))
+    assert [r["id"] for r in runs] == ids[::-1]
+    for run in runs:
+        RunSummary.model_validate(run)
+        assert dt.datetime.fromisoformat(run["created_at"]).utcoffset() == dt.timedelta(0)
+    assert [r["strategy"] for r in runs] == ["mean_reversion", "trend", "pairs"]
+    assert runs[2]["tickers"] == ["Y", "X"] and (runs[2]["start"], runs[2]["end"]) == (START, END)
+    assert [r["id"] for r in parse(client.get("/api/runs?limit=2"))] == ids[:0:-1]
+    for bad in (0, 501):
+        response = client.get(f"/api/runs?limit={bad}")
+        assert response.status_code == 422 and "limit" in parse(response)["detail"]
+
+
+def test_run_summary_is_read_from_the_stored_metrics(client: TestClient) -> None:
+    out = post(
+        client, "/api/backtest", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    (summary,) = parse(client.get("/api/runs"))
+    assert summary["engine_version"] == __version__
+    assert summary["sharpe_full"] == out["metrics"]["full"]["sharpe"]
+    assert summary["sharpe_oos"] == out["metrics"]["oos"]["sharpe"]
+    assert summary["total_return_full"] == out["metrics"]["full"]["total_return"]
+    assert summary["max_drawdown_full"] == out["metrics"]["full"]["max_drawdown"]
+
+
+def test_run_detail_returns_the_stored_request_and_metrics(client: TestClient) -> None:
+    request = {
+        "strategy": "pairs",
+        "tickers": ["Y", "X"],
+        "start": START,
+        "end": END,
+        "pairs_model": "kalman",
+    }
+    out = post(client, "/api/backtest", request)
+    detail = parse(client.get(f"/api/runs/{out['run_id']}"))
+    RunDetail.model_validate(detail)
+    assert detail["id"] == out["run_id"] and detail["engine_version"] == __version__
+    assert detail["resolved"] == out["resolved"]
+    assert detail["metrics"] == out["metrics"]
+    assert detail["benchmark_metrics"] == out["benchmark_metrics"]
+    missing = client.get(f"/api/runs/{out['run_id'] + 1}")
+    assert missing.status_code == 404 and parse(missing) == {"detail": f"No run {out['run_id'] + 1}"}
+
+
+def test_a_run_stored_by_an_older_engine_reads_back_with_null_new_fields(
+    client: TestClient, db_engine: Engine
+) -> None:
+    out = post(
+        client, "/api/backtest", {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    )
+    dropped = ("borrow_bps", "allow_short", "pairs_model")
+    resolved = {k: v for k, v in out["resolved"].items() if k not in dropped}
+
+    def without_borrow_drag(by_segment: dict) -> dict:
+        return {seg: {k: v for k, v in m.items() if k != "ann_borrow_drag"} for seg, m in by_segment.items()}
+
+    metrics = {"metrics": without_borrow_drag(out["metrics"]), "benchmark_metrics": out["benchmark_metrics"]}
+    with Session(db_engine) as s:
+        s.add(
+            BacktestRun(
+                created_at=dt.datetime(2026, 10, 16, 5, 4, 33, tzinfo=dt.UTC),
+                engine_version="0.0.9",
+                request_json=json.dumps(resolved),
+                metrics_json=json.dumps(metrics),
+            )
+        )
+        s.commit()
+        old_id = s.scalar(select(func.max(BacktestRun.id)))
+    detail = parse(client.get(f"/api/runs/{old_id}"))
+    RunDetail.model_validate(detail)
+    assert detail["engine_version"] == "0.0.9"
+    assert detail["created_at"] == "2026-10-16T05:04:33+00:00"
+    for field in dropped:
+        assert detail["resolved"][field] is None
+    for segment in ("is", "oos", "full"):
+        assert detail["metrics"][segment]["ann_borrow_drag"] is None
+        assert detail["metrics"][segment]["sharpe"] == out["metrics"][segment]["sharpe"]
+    with Session(db_engine) as s:  # the stored row is never rewritten
+        assert s.get(BacktestRun, old_id).request_json == json.dumps(resolved)
+    assert parse(client.get("/api/runs"))[0]["id"] == old_id
+
+
+# ---------------------------------------------------------------- offline mode (§4.3)
+
+
+def test_offline_mode_turns_a_cache_miss_into_503_without_a_download(
+    client: TestClient, fake_yahoo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = {"strategy": "pairs", "tickers": ["Y", "X"], "start": START, "end": END}
+    post(client, "/api/backtest", request)  # online: fills the cache
+    calls = len(fake_yahoo.calls)
+    monkeypatch.setenv("QUANT_OFFLINE", "1")
+    post(client, "/api/backtest", request)  # a cache hit still works offline
+    out = post(client, "/api/backtest", {**request, "tickers": ["Y", "T15"]}, status=503)
+    assert out["detail"] == "Offline mode: T15 is not in the local cache"
+    assert len(fake_yahoo.calls) == calls  # the network seam was never called
+    monkeypatch.setenv("QUANT_OFFLINE", "0")  # only "1" turns it on
+    post(client, "/api/backtest", {**request, "tickers": ["Y", "T15"]})
+    assert len(fake_yahoo.calls) == calls + 1
+
+
+def test_the_e2e_seed_serves_the_browser_tests_from_the_cache(
+    tmp_path: Path, fake_yahoo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scripts/seed_e2e.py writes a database on which the offline API answers from the cache (§12)."""
+    script = Path(__file__).parents[1] / "scripts" / "seed_e2e.py"
+    spec = importlib.util.spec_from_file_location("seed_e2e", script)
+    seed_e2e = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed_e2e)
+    path = tmp_path / "e2e.db"
+    path.write_text("stale")  # the script replaces whatever is there
+    monkeypatch.setenv("QUANT_OFFLINE", "1")  # as in playwright.config.ts: the seed must still write
+    counts = seed_e2e.seed(path)
+    assert set(counts) == {"SYNY", "SYNX", "SYNT", "SPY", "^IRX"}
+    engine = make_engine(f"sqlite:///{path.as_posix()}")
+    Base.metadata.create_all(engine)  # what the app's lifespan does; the tables already exist
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override() -> Any:
+        with factory() as s:
+            yield s
+
+    app.dependency_overrides[get_session] = override
+    diagnostics_cache.clear()
+    try:
+        client = TestClient(app)
+        dates = {"start": "2012-01-03", "end": "2019-12-31"}
+        post(client, "/api/backtest", {"strategy": "pairs", "tickers": ["SYNY", "SYNX"], **dates})
+        post(client, "/api/backtest", {"strategy": "trend", "tickers": ["SYNT"], **dates})
+        late = {"strategy": "trend", "tickers": ["SYNT"], **dates, "end": "2020-06-30"}
+        assert (
+            post(client, "/api/backtest", late, 503)["detail"]
+            == "Offline mode: SYNT is not in the local cache"
+        )
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        engine.dispose()
+    assert fake_yahoo.calls == []

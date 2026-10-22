@@ -1,4 +1,4 @@
-"""Scores, entry/exit rules and unit weights for strategies A, B and C (§5.1-§5.5).
+"""Scores, entry/exit rules and unit weights for strategies A-D (§5.1-§5.5, §5.7-§5.8).
 
 Pure (§0, rule 8). Every function takes pandas objects indexed by the run calendar and returns
 new ones on the same index. A score or signal "at date t" uses data up to and including the
@@ -13,6 +13,8 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+from app.services import stats
 
 # §5.2/§5.3: a rolling variance of rebased log prices at or below this is a degenerate window.
 VAR_FLOOR = 1e-12
@@ -36,16 +38,23 @@ def hysteresis_signal(z: pd.Series, z_entry: float, z_exit: float) -> pd.Series:
     if not 0 <= z_exit < z_entry:
         raise ValueError(f"need 0 <= z_exit < z_entry, got z_exit={z_exit}, z_entry={z_entry}")
     # Two independent hysteresis legs; they can't both be on when 0 <= z_exit < z_entry.
-    short_m = pd.Series(np.nan, index=z.index)
-    short_m[z > z_entry] = 1.0
-    short_m[z < z_exit] = 0.0
-    long_m = pd.Series(np.nan, index=z.index)
-    long_m[z < -z_entry] = 1.0
-    long_m[z > -z_exit] = 0.0
-    short_m[z.isna()] = 0.0
-    long_m[z.isna()] = 0.0
-    signal = long_m.ffill().fillna(0.0) - short_m.ffill().fillna(0.0)
-    return signal.rename("signal")
+    # NaN compares False, so a NaN day turns neither leg on, and it turns both off.
+    v = z.to_numpy(dtype=float)
+    flat = np.isnan(v)
+    short = _latch(on=v > z_entry, off=(v < z_exit) | flat)
+    long = _latch(on=v < -z_entry, off=(v > -z_exit) | flat)
+    return pd.Series(long - short, index=z.index, name="signal")
+
+
+def _latch(*, on: np.ndarray, off: np.ndarray) -> np.ndarray:
+    """1.0 from each `on` day up to the next `off` day, which is 0.0; 0.0 before the first `on`.
+
+    Each day takes the value of the latest day that set the latch (1.0 if on, 0.0 if off; off
+    wins when both are true), so this is a forward fill of those days.
+    """
+    setting = on | off
+    latest = np.maximum.accumulate(np.where(setting, np.arange(on.size), -1))  # -1: none yet
+    return np.where((latest >= 0) & ~off[latest] & on[latest], 1.0, 0.0)
 
 
 def first_of_period(index: pd.DatetimeIndex, freq: Literal["W", "M"]) -> pd.Series:
@@ -116,6 +125,27 @@ def pairs_score(y_close: pd.Series, x_close: pd.Series, L: int) -> PairsScore:
     return PairsScore(z=z.rename("z"), beta=beta.rename("beta"))
 
 
+def kalman_pairs_score(y_close: pd.Series, x_close: pd.Series, L: int, delta: float) -> PairsScore:
+    """Kalman-filter score and hedge ratio of Y (= tickers[0]) on X (= tickers[1]) (§5.7).
+
+    Replaces pairs_score in step 1 of §5.0 when pairs_model="kalman"; everything downstream is
+    unchanged. On the rebased log prices of §5.3, the state (alpha_t, beta_t) is a random walk
+    with q = delta / (1 - delta), seeded by the OLS fit on days 0..L-1.
+
+    Returns:
+        PairsScore. z is the filter's standardized innovation: its prediction uses data through
+        t - 1, and it is N(0, 1) under the model. beta is the filtered hedge ratio, using closes
+        through t. Both are NaN for t < L, and everywhere when the warm-up window has a flat X or
+        exactly collinear legs.
+    """
+    y, x = np.log(y_close / y_close.iloc[0]), np.log(x_close / x_close.iloc[0])  # rebased logs
+    kf = stats.kalman_filter(y.to_numpy(), x.to_numpy(), L, delta)
+    index = y_close.index
+    return PairsScore(
+        z=pd.Series(kf.z, index=index, name="z"), beta=pd.Series(kf.beta, index=index, name="beta")
+    )
+
+
 def hedge_ratio_used(
     beta: pd.Series, signal: pd.Series, hedge_mode: Literal["fixed_at_entry", "rolling"]
 ) -> pd.Series:
@@ -141,11 +171,12 @@ def pair_unit_weights(signal: pd.Series, beta_used: pd.Series, tickers: tuple[st
     1 / (1 + |beta|). Columns are the tickers, so they match the returns frame (§6.1).
     Weights are exactly 0.0 when flat, including during warm-up.
     """
-    open_ = signal != 0
-    if beta_used[open_].isna().any():
+    s, beta = signal.to_numpy(dtype=float), beta_used.to_numpy(dtype=float)
+    open_ = s != 0
+    if np.isnan(beta[open_]).any():
         raise ValueError("beta_used is NaN on a day with an open pairs position")
-    w_y = np.where(open_, signal / (1 + beta_used.abs()), 0.0)
-    w_x = np.where(open_, -signal * beta_used / (1 + beta_used.abs()), 0.0)
+    w_y = np.where(open_, s / (1 + np.abs(beta)), 0.0)
+    w_x = np.where(open_, -s * beta / (1 + np.abs(beta)), 0.0)
     return pd.DataFrame({tickers[0]: w_y, tickers[1]: w_x}, index=signal.index)
 
 

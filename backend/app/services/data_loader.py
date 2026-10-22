@@ -15,13 +15,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import select
+from sqlalchemy import String, select, type_coerce
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 from yfinance.exceptions import YFRateLimitError
 
+from app.config import offline_mode
 from app.models import HistoricalPrice, TickerCoverage
 from app.services import calendar
 from app.services.backtester import InsufficientDataError
@@ -196,7 +198,13 @@ def _set_coverage(session: Session, ticker: str, start: dt.date, end: dt.date) -
 
 
 def _download(ticker: str, start: dt.date, end: dt.date, requested: tuple[dt.date, dt.date]) -> pd.DataFrame:
-    """fetch_from_yahoo with the §4.3 error mapping. Called once per ticker per request at most."""
+    """fetch_from_yahoo with the §4.3 error mapping. Called once per ticker per request at most.
+
+    In offline mode (QUANT_OFFLINE=1) a cache miss raises 503 here, before the network seam is
+    called, so the browser tests can never reach Yahoo (§4.3).
+    """
+    if offline_mode():
+        raise DataSourceError(503, f"Offline mode: {ticker} is not in the local cache")
     try:
         raw = fetch_from_yahoo(ticker, start, end)
     except YFRateLimitError as exc:
@@ -237,17 +245,23 @@ def ensure_cached(session: Session, ticker: str, start: dt.date, end: dt.date) -
 
 
 def read_prices(session: Session, ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """Cached close and adj_close for [start, end], on a datetime64[ns] index named date."""
+    """Cached close and adj_close for [start, end], on a datetime64[ns] index named date.
+
+    The dates are read as the stored ISO text and parsed by numpy in one call: turning each
+    row into a datetime.date first took about 40% of the read. The query runs on the session's
+    connection, which skips the ORM's row handling; it reads plain columns, not objects.
+    """
     stmt = (
-        select(HistoricalPrice.date, HistoricalPrice.close, HistoricalPrice.adj_close)
+        select(type_coerce(HistoricalPrice.date, String), HistoricalPrice.close, HistoricalPrice.adj_close)
         .where(HistoricalPrice.ticker == ticker, HistoricalPrice.date >= start, HistoricalPrice.date <= end)
         .order_by(HistoricalPrice.date)
     )
-    rows = session.execute(stmt).all()
-    frame = pd.DataFrame(rows, columns=["date", "close", "adj_close"])
-    frame.index = calendar.to_ns_index(pd.to_datetime(frame.pop("date")))
-    frame.index.name = "date"
-    return frame
+    rows = session.connection().execute(stmt).all()
+    dates, close, adj_close = zip(*rows, strict=True) if rows else ((), (), ())
+    return pd.DataFrame(
+        {"close": np.array(close, dtype=float), "adj_close": np.array(adj_close, dtype=float)},
+        index=pd.DatetimeIndex(np.array(dates, dtype="datetime64[ns]"), name="date"),
+    )
 
 
 def _dates(index: pd.DatetimeIndex, limit: int = 5) -> str:

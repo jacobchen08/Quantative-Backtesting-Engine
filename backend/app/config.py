@@ -21,3 +21,9 @@ def load_settings() -> Settings:
 
 
 settings = load_settings()
+
+
+def offline_mode() -> bool:
+    """QUANT_OFFLINE=1 (§4.3): a cache miss raises 503 instead of downloading. Read on every call,
+    so a test can set it with monkeypatch.setenv."""
+    return os.environ.get("QUANT_OFFLINE") == "1"

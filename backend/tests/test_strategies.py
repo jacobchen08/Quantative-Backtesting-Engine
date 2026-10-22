@@ -8,12 +8,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.services import sizing
+from app.services import sizing, stats
 from app.services.backtester import NoValidScoreError, run_backtest
 from app.services.pipeline import StrategyParams, run_strategy
+from app.services.report import build_report
 from app.services.strategies import (
     first_of_period,
     hysteresis_signal,
+    kalman_pairs_score,
     mean_reversion_score,
     pairs_score,
     trend_score,
@@ -365,26 +367,334 @@ def test_sized_weights_are_exactly_zero_when_flat(
     assert not run.weights.isna().any().any()
 
 
-# ---------------------------------------------------------------- 11. long-only switch (Phase 5)
+# ---------------------------------------------------------------- 9. Kalman pairs model
+
+
+def reference_kalman(y: np.ndarray, x: np.ndarray, L: int, delta: float) -> tuple[np.ndarray, ...]:
+    """The plain matrix recursion of §5.7, with its OLS initialization, as a loop."""
+    n = len(y)
+    H = np.column_stack([np.ones(L), x[:L]])
+    s = np.linalg.lstsq(H, y[:L], rcond=None)[0]
+    resid = y[:L] - H @ s
+    R = resid @ resid / (L - 2)
+    P = R * np.linalg.inv(H.T @ H)
+    q = delta / (1 - delta)
+    z, states, covs = np.full(n, np.nan), np.full((n, 2), np.nan), np.full((n, 2, 2), np.nan)
+    for t in range(L, n):
+        P = P + q * np.eye(2)
+        h = np.array([1.0, x[t]])
+        e = y[t] - h @ s
+        S = h @ P @ h + R
+        z[t] = e / np.sqrt(S)
+        K = P @ h / S
+        s = s + K * e
+        A = np.eye(2) - np.outer(K, h)
+        P = A @ P @ A.T + R * np.outer(K, K)
+        states[t], covs[t] = s, P
+    return z, states, covs
+
+
+def rebased_logs(prices: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    y, x = np.log(prices["Y"] / prices["Y"].iloc[0]), np.log(prices["X"] / prices["X"].iloc[0])
+    return y.to_numpy(), x.to_numpy()
+
+
+def test_kalman_with_delta_zero_is_expanding_window_ols(prices: pd.DataFrame) -> None:
+    y, x = rebased_logs(prices)
+    L = 60
+    kf = stats.kalman_filter(y, x, L, 0.0)
+    assert np.isnan(kf.alpha[:L]).all() and np.isfinite(kf.alpha[L:]).all()
+    rng = np.random.default_rng(5)
+    for t in [L, L + 1, len(y) - 1, *rng.choice(np.arange(L, len(y)), size=25, replace=False)]:
+        slope, intercept = np.polyfit(x[: t + 1], y[: t + 1], 1)  # OLS on days 0..t
+        assert abs(kf.alpha[t] - intercept) < 1e-8 and abs(kf.beta[t] - slope) < 1e-8, t
+
+
+@pytest.mark.parametrize("delta", [1e-4, 1e-6, 0.0])
+def test_kalman_matches_the_matrix_recursion(prices: pd.DataFrame, delta: float) -> None:
+    y, x = rebased_logs(prices)
+    L = 60
+    kf = stats.kalman_filter(y, x, L, delta, keep_cov=True)
+    z, states, covs = reference_kalman(y, x, L, delta)
+    for got, want in ((kf.z, z), (kf.alpha, states[:, 0]), (kf.beta, states[:, 1])):
+        assert np.isnan(got[:L]).all()
+        assert np.max(np.abs(got[L:] - want[L:])) < 1e-12
+    P = kf.cov[L:]
+    scale = np.abs(covs[L:]).max(axis=(1, 2))[:, None, None]
+    assert np.max(np.abs(P - covs[L:]) / scale) < 1e-12
+    assert np.array_equal(P[:, 0, 1], P[:, 1, 0])  # symmetric
+    assert (np.linalg.eigvalsh(P) > 0).all()  # positive definite throughout
+
+
+@pytest.mark.parametrize("delta, seed", [(1e-4, 1), (1e-5, 2)])
+def test_kalman_innovation_z_is_standardized_under_the_model(delta: float, seed: int) -> None:
+    # Data from the §5.7 model itself. The state is held constant over the L-day start-up window,
+    # which is what the OLS initialization assumes (the posterior of a flat prior after those
+    # days), and L = 2,000 keeps the sampling error of the estimated R small (approved deviation).
+    L, n_filtered, R = 2000, 5000, 1e-4
+    n, q = L + n_filtered, delta / (1 - delta)
+    g = np.random.default_rng(seed)
+    x = np.cumsum(g.normal(0.0, 0.01, n))
+    d_alpha, d_beta = g.normal(0.0, np.sqrt(q), n), g.normal(0.0, np.sqrt(q), n)
+    d_alpha[:L] = d_beta[:L] = 0.0
+    y = 0.1 + np.cumsum(d_alpha) + (1.0 + np.cumsum(d_beta)) * x + g.normal(0.0, np.sqrt(R), n)
+    z = stats.kalman_filter(y, x, L, delta).z[L:]
+    assert len(z) == n_filtered and np.isfinite(z).all()
+    assert abs(z.mean()) < 0.05 and abs(z.std(ddof=1) - 1) < 0.05
+
+
+def test_kalman_degenerate_inputs_have_no_score(prices: pd.DataFrame, rf: pd.Series) -> None:
+    L = 60
+    collinear = prices.assign(Y=prices["X"] ** 2)  # ln Y = 2 ln X exactly
+    flat_x = prices.copy()
+    flat_x.iloc[:L, flat_x.columns.get_loc("X")] = flat_x["X"].iloc[0]  # a flat warm-up window
+    # Nearly flat: Var(x) about 1e-14, below the 1e-12 floor but not 0, where solve() would
+    # return a large, meaningless answer instead of failing (§5.7).
+    nearly_flat = prices.copy()
+    wiggle = 1 + 1e-7 * np.random.default_rng(1).standard_normal(L)
+    nearly_flat.iloc[:L, nearly_flat.columns.get_loc("X")] = nearly_flat["X"].iloc[0] * wiggle
+    assert 0 < np.var(np.log(nearly_flat["X"].iloc[:L] / nearly_flat["X"].iloc[0]), ddof=1) <= 1e-12
+    for frame in (collinear, flat_x, nearly_flat):
+        out = kalman_pairs_score(frame["Y"], frame["X"], L, 1e-4)
+        assert out.z.isna().all() and out.beta.isna().all()
+        assert not np.isinf(out.z.to_numpy()).any()
+        assert (hysteresis_signal(out.z, 2.0, 0.5) == 0).all()
+        params = StrategyParams(strategy="pairs", tickers=("Y", "X"), L=L, pairs_model="kalman")
+        with pytest.raises(NoValidScoreError):
+            run_strategy(frame, rf, params)
+
+
+@pytest.mark.parametrize("hedge_mode", ["fixed_at_entry", "rolling"])
+def test_kalman_pairs_feed_the_unchanged_pairs_pipeline(
+    prices: pd.DataFrame, rf: pd.Series, hedge_mode: str
+) -> None:
+    params = StrategyParams(
+        strategy="pairs",
+        tickers=("Y", "X"),
+        L=60,
+        pairs_model="kalman",
+        kalman_delta=1e-6,
+        hedge_mode=hedge_mode,
+    )
+    run = run_strategy(prices, rf, params)
+    want = kalman_pairs_score(prices["Y"], prices["X"], 60, 1e-6)
+    assert np.array_equal(run.score.to_numpy(), want.z.to_numpy(), equal_nan=True)
+    assert np.array_equal(run.beta.to_numpy(), want.beta.to_numpy(), equal_nan=True)  # the filtered beta
+    kf = stats.kalman_filter(*rebased_logs(prices), 60, 1e-6)  # on the rebased log prices of §5.3
+    assert np.array_equal(want.z.to_numpy(), kf.z, equal_nan=True)
+    assert np.array_equal(want.beta.to_numpy(), kf.beta, equal_nan=True)
+    assert run.t0 == 60  # z is NaN for t < L
+    s, W = run.signal, run.weights
+    assert (s != 0).sum() > 50 and (W[s == 0] == 0.0).all().all()
+    assert np.array_equal(s.to_numpy(), hysteresis_signal(want.z, 2.0, 0.5).to_numpy())
+    if hedge_mode == "rolling":
+        assert np.array_equal(run.beta_used.to_numpy(), run.beta.to_numpy(), equal_nan=True)
+    else:
+        opens = s.ne(s.shift()) & s.ne(0)
+        changed = run.beta_used.ne(run.beta_used.shift()) & run.beta_used.notna()
+        assert not (changed & ~opens).any()
+    gross = W.abs().sum(axis=1)[s != 0]
+    assert np.allclose(gross, 1.0, rtol=0, atol=1e-15)
+    ols = run_strategy(prices, rf, replace(params, pairs_model="ols"))
+    assert not np.array_equal(ols.score.to_numpy(), run.score.to_numpy(), equal_nan=True)
+
+
+# ---------------------------------------------------------------- 10. trend portfolio
+
+PORTFOLIO = ("T08", "T15", "T20", "T30")
+
+
+def portfolio_params(**changes: object) -> StrategyParams:
+    base = {"strategy": "trend_portfolio", "tickers": PORTFOLIO, "L": 63, "vol_target": 0.40}
+    return StrategyParams(**{**base, **changes})
+
+
+@pytest.mark.parametrize("freq, refresh", [("monthly", "weekly"), ("daily", "daily"), ("monthly", "monthly")])
+def test_each_leg_is_single_asset_trend_masked_by_its_forecast(
+    portfolio_prices: pd.DataFrame, rf: pd.Series, freq: str, refresh: str
+) -> None:
+    params = portfolio_params(signal_frequency=freq, vol_refresh=refresh, vol_halflife=42)
+    run = run_strategy(portfolio_prices, rf, params)
+    assert run.score is None and run.vol_forecast is None
+    for leg in PORTFOLIO:
+        single = run_strategy(
+            portfolio_prices,
+            rf,
+            StrategyParams(
+                strategy="trend",
+                tickers=(leg,),
+                L=63,
+                signal_frequency=freq,
+                vol_target=0.40,
+                vol_halflife=42,
+                vol_refresh=refresh,
+            ),
+        )
+        assert np.array_equal(run.leg_scores[leg].to_numpy(), single.score.to_numpy(), equal_nan=True)
+        assert np.array_equal(
+            run.leg_vol_forecasts[leg].to_numpy(), single.vol_forecast.to_numpy(), equal_nan=True
+        )
+        assert np.array_equal(
+            run.leg_signals[leg].iloc[run.t0 :].to_numpy(), single.signal.iloc[run.t0 :].to_numpy()
+        )
+
+
+@pytest.mark.parametrize("freq, H", [("daily", 21), ("daily", 126), ("monthly", 42)])
+def test_portfolio_t0_is_the_first_day_every_leg_is_valid(
+    portfolio_prices: pd.DataFrame, rf: pd.Series, freq: str, H: int
+) -> None:
+    params = portfolio_params(signal_frequency=freq, vol_halflife=H)
+    run = run_strategy(portfolio_prices, rf, params)
+    valid = run.leg_scores.notna()
+    t0 = int(np.argmax(valid.all(axis=1).to_numpy()))
+    assert run.t0 == t0 and valid.iloc[t0].all() and not valid.iloc[t0 - 1].all()
+    assert run.t0 == max(int(np.argmax(valid[leg].to_numpy())) for leg in PORTFOLIO)
+    assert (run.weights.iloc[:t0] == 0.0).all().all() and (run.leg_signals.iloc[:t0] == 0.0).all().all()
+    assert (run.signal.iloc[:t0] == 0.0).all() and run.signal.iloc[t0] == 1.0
+    assert run.backtest.e == t0 + params.execution_lag
+
+
+@pytest.mark.parametrize("n_legs, cap", [(4, 2.0), (3, 1.0), (2, 4.0)])
+def test_portfolio_weights_are_signal_times_scale_over_n(
+    portfolio_prices: pd.DataFrame, rf: pd.Series, n_legs: int, cap: float
+) -> None:
+    legs = PORTFOLIO[:n_legs]
+    params = portfolio_params(tickers=legs, max_leverage=cap, vol_target=0.60, signal_frequency="daily")
+    run = run_strategy(portfolio_prices, rf, params)
+    s, su, W = run.leg_signals, run.leg_scale_used, run.weights
+    assert list(W.columns) == list(legs)
+    for leg in legs:
+        want = (s[leg] * su[leg] / n_legs).where(s[leg] != 0, 0.0)
+        assert np.array_equal(W[leg].to_numpy(), want.to_numpy())  # exactly s_i * scale_used_i / N
+        assert (W[leg][s[leg] == 0] == 0.0).all()
+    assert (W.abs().max(axis=1) <= cap / n_legs).all()
+    assert (W.abs().sum(axis=1) <= cap * (1 + 1e-15)).all()  # up to the rounding of a sum of N terms
+    at_cap = W.abs().ge(cap / n_legs * (1 - 1e-12))
+    assert at_cap.to_numpy().any()  # the 8% asset at a 60% target hits the cap
+    assert (run.signal == s.ne(0).any(axis=1).astype(float)).all()
+
+
+@pytest.mark.parametrize("refresh", ["weekly", "monthly"])
+def test_each_leg_resizes_on_its_refresh_days_and_its_own_signal_changes(
+    portfolio_prices: pd.DataFrame, rf: pd.Series, refresh: str
+) -> None:
+    params = portfolio_params(
+        L=21, signal_frequency="daily", vol_refresh=refresh, vol_target=0.15, max_leverage=4.0
+    )
+    run = run_strategy(portfolio_prices, rf, params)
+    starts = first_of_period(portfolio_prices.index, "W" if refresh == "weekly" else "M")
+    flips = 0
+    for leg in PORTFOLIO:
+        s, su = run.leg_signals[leg], run.leg_scale_used[leg]
+        scale = (0.15 / run.leg_vol_forecasts[leg]).clip(upper=4.0)
+        own_change = s.ne(s.shift()) & (np.arange(len(s)) >= run.t0)
+        # Every change of this leg's own signal (an entry, an exit or a flip) resizes it at once...
+        assert (su[own_change & s.ne(0)] == scale[own_change & s.ne(0)]).all(), leg
+        # ...and between them its size moves only on refresh days.
+        moved = su.ne(su.shift()) & su.notna() & su.shift().notna()
+        assert not (moved & ~(starts | own_change)).any(), leg
+        flips += int((own_change & s.ne(0) & s.shift().ne(0)).sum())
+    assert flips > 0  # direct flips were exercised
+
+
+def test_portfolio_benchmark_is_the_equal_weight_basket(
+    portfolio_prices: pd.DataFrame, rf: pd.Series
+) -> None:
+    run = run_strategy(portfolio_prices, rf, portfolio_params())
+    report = build_report(run)
+    bt, series = run.backtest, report.series
+    basket = sum(portfolio_prices[t] / portfolio_prices[t].shift(1) - 1 for t in PORTFOLIO) / len(PORTFOLIO)
+    want = 100_000.0 * np.cumprod(1.0 + basket.iloc[bt.e : bt.stop].to_numpy())
+    np.testing.assert_allclose(series["benchmark_equity"].dropna().to_numpy()[1:], want, rtol=1e-12)
+    assert report.benchmark_metrics["full"].pct_days_in_market == 1.0
+    assert report.diagnostics is None and "score" not in series and "vol_forecast" not in series
+
+
+def test_portfolio_legs_track_their_share_of_the_vol_target(universe) -> None:
+    # Constant-vol assets (8-30% a year) with a constant long signal once every forecast exists,
+    # and a target the cap never binds: scale = 0.20 / sigma is about 2.5 at most, below 4.
+    idx = pd.bdate_range("2012-01-02", periods=1500).as_unit("ns")
+    H, target, cap, n_legs = 42, 0.20, 4.0, 4
+    worst = (np.inf, -np.inf)
+    for seed in range(20):
+        prices = universe(idx, seed=seed, drift=0.0)
+        R = prices / prices.shift(1) - 1
+        sigmas = pd.DataFrame({leg: sizing.vol_forecast(R[leg], H) for leg in PORTFOLIO})
+        t0 = int(np.argmax(sigmas.notna().all(axis=1).to_numpy()))
+        signals = pd.DataFrame(0.0, index=idx, columns=list(PORTFOLIO))
+        signals.iloc[t0:] = 1.0
+        W, scale_used = sizing.size_portfolio(
+            signals, sigmas, vol_target=target, max_leverage=cap, vol_refresh="weekly"
+        )
+        assert (scale_used.iloc[t0:] < cap).all().all()  # the cap never binds
+        bt = run_backtest(
+            R=R,
+            W=W,
+            s=signals.ne(0).any(axis=1).astype(float),
+            rf=pd.Series(0.0, index=idx),
+            t0=t0,
+            k=1,
+            cost_bps=0.0,
+            borrow_bps=0.0,
+            E0=1.0,
+            split_date=idx[900],
+            leg_signals=signals,
+        )
+        window = slice(bt.e + 3 * H, None)  # skip 3 half-lives after the first evaluated day
+        for leg in PORTFOLIO:
+            leg_return = (bt.w[leg].shift(1) * R[leg]).iloc[window]
+            ratio = leg_return.std(ddof=1) * np.sqrt(252) / (target / n_legs)
+            worst = (min(worst[0], ratio), max(worst[1], ratio))
+            assert 0.8 <= ratio <= 1.2, (seed, leg, ratio)
+    assert worst[1] - worst[0] > 0.01  # the seeds differ
+
+
+def test_trend_portfolio_needs_two_to_twelve_distinct_tickers_and_a_vol_target() -> None:
+    for tickers in (("T08",), ("T08", "T08"), tuple(f"A{i}" for i in range(13))):
+        with pytest.raises(ValueError, match="trend_portfolio needs"):
+            portfolio_params(tickers=tickers)
+    with pytest.raises(ValueError, match="vol_target"):
+        portfolio_params(vol_target=None)
+    assert portfolio_params(tickers=tuple(f"A{i}" for i in range(12))).tickers[-1] == "A11"
+
+
+# ---------------------------------------------------------------- 11. long-only switch
 
 LONG_ONLY_CASES = [
     {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40},
     {"strategy": "mean_reversion", "tickers": ("Y",), "L": 40, "vol_target": 0.10, "vol_refresh": "weekly"},
     {"strategy": "trend", "tickers": ("X",), "L": 63, "signal_frequency": "daily"},
     {"strategy": "trend", "tickers": ("X",), "L": 63, "vol_target": 0.10, "vol_refresh": "daily"},
+    {
+        "strategy": "trend_portfolio",
+        "tickers": PORTFOLIO,
+        "L": 63,
+        "signal_frequency": "daily",
+        "vol_target": 0.4,
+    },
 ]
 
 
+def _scores(run) -> np.ndarray:
+    return (run.score if run.score is not None else run.leg_scores).to_numpy()
+
+
 @pytest.mark.parametrize("config", LONG_ONLY_CASES, ids=lambda c: f"{c['strategy']}-vol{c.get('vol_target')}")
-def test_long_only_never_holds_a_negative_position(prices: pd.DataFrame, rf: pd.Series, config: dict) -> None:
+def test_long_only_never_holds_a_negative_position(
+    portfolio_prices: pd.DataFrame, rf: pd.Series, config: dict
+) -> None:
+    prices = portfolio_prices
     both = run_strategy(prices, rf, StrategyParams(**config))
     long_only = run_strategy(prices, rf, StrategyParams(**config, allow_short=False))
-    assert (both.signal < 0).any()  # the switch has something to remove
+    legs_both = both.leg_signals if both.leg_signals is not None else both.signal
+    assert (legs_both < 0).to_numpy().any()  # the switch has something to remove
     assert (long_only.signal >= 0).all() and (long_only.weights >= 0).all().all()
     assert (long_only.backtest.pos >= 0).all() and (long_only.backtest.w >= 0).all().all()
+    if long_only.leg_signals is not None:  # every trend-portfolio leg
+        assert (long_only.leg_signals >= 0).all().all() and (long_only.backtest.leg_pos >= 0).all().all()
     assert (long_only.backtest.trades["side"] == "long").all()
     # The clip comes after the score: the reported score and t0 are unchanged.
-    assert np.array_equal(both.score.to_numpy(), long_only.score.to_numpy(), equal_nan=True)
+    assert np.array_equal(_scores(both), _scores(long_only), equal_nan=True)
     assert both.t0 == long_only.t0 and both.split_date == long_only.split_date
 
 

@@ -12,10 +12,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import __version__
@@ -28,14 +29,21 @@ from app.schemas import (
     BacktestResponse,
     MonteCarloRequest,
     MonteCarloResponse,
+    RunDetail,
+    RunSummary,
     SensitivityRequest,
     SensitivityResponse,
+    WalkForwardRequest,
+    WalkForwardResponse,
 )
-from app.serialization import backtest_payload, monte_carlo_payload, sensitivity_payload
+from app.serialization import backtest_payload, monte_carlo_payload, sensitivity_payload, walk_forward_payload
 from app.services import data_loader, monte_carlo, pipeline
 from app.services.backtester import InsufficientDataError
 from app.services.data_loader import DataSourceError
 from app.services.monte_carlo import MonteCarloInputError
+from app.services.report import build_report
+from app.services.sensitivity import run_sensitivity
+from app.services.walk_forward import run_walk_forward
 
 logging.basicConfig(level=settings.log_level)
 
@@ -52,7 +60,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="Quant Engine", version=__version__, lifespan=lifespan)
+app = FastAPI(title="Quantitative Backtesting Engine", version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -107,7 +115,7 @@ def backtest(request: BacktestRequest, session: SessionDep) -> dict[str, Any]:
     """Run one backtest and store it in backtest_runs."""
     market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
     run = pipeline.run_strategy(market.prices, market.rf, request.to_params())
-    report = pipeline.build_report(run, pairs_diagnostics=diagnostics_cache.get, end=request.end)
+    report = build_report(run, pairs_diagnostics=diagnostics_cache.get, end=request.end)
     payload = backtest_payload(
         report, {**request.resolved(), "rf_source": request.rf_source()}, market.warnings
     )
@@ -129,7 +137,7 @@ def backtest(request: BacktestRequest, session: SessionDep) -> dict[str, Any]:
 def sensitivity(request: SensitivityRequest, session: SessionDep) -> dict[str, Any]:
     """In-sample Sharpe ratios over the parameter grid, on one common window (§9). Not stored."""
     market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
-    result = pipeline.run_sensitivity(
+    result = run_sensitivity(
         market.prices,
         market.rf,
         request.to_params(),
@@ -139,17 +147,35 @@ def sensitivity(request: SensitivityRequest, session: SessionDep) -> dict[str, A
     return sensitivity_payload(result)
 
 
+@app.post("/api/walk-forward", response_model=WalkForwardResponse)
+def walk_forward(request: WalkForwardRequest, session: SessionDep) -> dict[str, Any]:
+    """Walk-forward re-optimization over the parameter grid (§9.2). Not stored."""
+    market = data_loader.load_market(session, request.tickers, request.start, request.end, request.risk_free)
+    result = run_walk_forward(
+        market.prices,
+        market.rf,
+        request.to_params(),
+        L_values=None if request.L_values is None else tuple(request.L_values),
+        z_entry_values=None if request.z_entry_values is None else tuple(request.z_entry_values),
+        train_days=request.train_days,
+        test_days=request.test_days,
+        anchored=request.anchored,
+    )
+    return walk_forward_payload(result, request.resolved(), market.warnings)
+
+
 @app.post("/api/monte-carlo", response_model=MonteCarloResponse)
 def run_monte_carlo(request: MonteCarloRequest, session: SessionDep) -> dict[str, Any]:
-    """GBM and block-bootstrap projections of a strategy's or a ticker's daily returns (§10). Not stored."""
+    """GBM, block-bootstrap and stationary-bootstrap projections of a strategy's or a ticker's daily
+    returns (§10). Not stored."""
     if request.source == "strategy":
         bt = request.backtest
         market = data_loader.load_market(session, bt.tickers, bt.start, bt.end, bt.risk_free)
         run = pipeline.run_strategy(market.prices, market.rf, bt.to_params())
-        returns, has_exposure = pipeline.strategy_mc_returns(run, request.window)
+        returns, has_exposure = monte_carlo.strategy_returns(run, request.window)
     else:
         close, _ = data_loader.load_close(session, request.ticker, request.start, request.end)
-        returns, has_exposure = pipeline.ticker_returns(close), True
+        returns, has_exposure = monte_carlo.ticker_returns(close), True
     seed = request.seed if request.seed is not None else secrets.randbelow(monte_carlo.MAX_SEED)
     result = monte_carlo.simulate(
         returns,
@@ -161,3 +187,58 @@ def run_monte_carlo(request: MonteCarloRequest, session: SessionDep) -> dict[str
         has_exposure=has_exposure,
     )
     return monte_carlo_payload(result, request.resolved())
+
+
+# ---------------------------------------------------------------- run history (§11.4)
+
+
+def _utc_iso(created_at: dt.datetime) -> str:
+    """ISO 8601 in UTC. SQLite hands timezone-aware columns back naive, and they were written in UTC."""
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=dt.UTC)
+    return created_at.astimezone(dt.UTC).isoformat()
+
+
+@app.get("/api/runs", response_model=list[RunSummary])
+def list_runs(session: SessionDep, limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[dict[str, Any]]:
+    """Stored backtests, newest first, summarized from their stored JSON."""
+    rows = session.scalars(select(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit))
+    out = []
+    for row in rows:
+        resolved = json.loads(row.request_json)
+        metrics = json.loads(row.metrics_json)["metrics"]
+        full, oos = metrics["full"], metrics.get("oos")
+        out.append(
+            {
+                "id": row.id,
+                "created_at": _utc_iso(row.created_at),
+                "engine_version": row.engine_version,
+                "strategy": resolved["strategy"],
+                "tickers": resolved["tickers"],
+                "start": resolved["start"],
+                "end": resolved["end"],
+                "sharpe_full": full.get("sharpe"),
+                "sharpe_oos": None if oos is None else oos.get("sharpe"),
+                "total_return_full": full["total_return"],
+                "max_drawdown_full": full["max_drawdown"],
+            }
+        )
+    return out
+
+
+@app.get("/api/runs/{run_id}", response_model=RunDetail)
+def get_run(run_id: int, session: SessionDep) -> dict[str, Any]:
+    """One stored backtest: its resolved request and metrics. Fields an older engine didn't store
+    read back as null."""
+    row = session.get(BacktestRun, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No run {run_id}")
+    stored = json.loads(row.metrics_json)
+    return {
+        "id": row.id,
+        "created_at": _utc_iso(row.created_at),
+        "engine_version": row.engine_version,
+        "resolved": json.loads(row.request_json),
+        "metrics": stored["metrics"],
+        "benchmark_metrics": stored["benchmark_metrics"],
+    }

@@ -1,0 +1,745 @@
+{
+ "recorded_on": "2026-10-20",
+ "data_end": "2025-12-31",
+ "engine_version": "0.1.0",
+ "scenarios": [
+  {
+   "id": "pairs-ko-pep",
+   "label": "Pairs: KO / PEP",
+   "backtest": {
+    "strategy": "pairs",
+    "tickers": [
+     "KO",
+     "PEP"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "pairs",
+    "tickers": [
+     "KO",
+     "PEP"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "pairs",
+     "tickers": [
+      "KO",
+      "PEP"
+     ],
+     "L": 60,
+     "z_entry": 2.0,
+     "z_exit": 0.5,
+     "hedge_mode": "fixed_at_entry",
+     "pairs_model": "ols",
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "pairs",
+    "tickers": [
+     "KO",
+     "PEP"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "pairs-xom-cvx",
+   "label": "Pairs: XOM / CVX",
+   "backtest": {
+    "strategy": "pairs",
+    "tickers": [
+     "XOM",
+     "CVX"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "pairs",
+    "tickers": [
+     "XOM",
+     "CVX"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "pairs",
+     "tickers": [
+      "XOM",
+      "CVX"
+     ],
+     "L": 60,
+     "z_entry": 2.0,
+     "z_exit": 0.5,
+     "hedge_mode": "fixed_at_entry",
+     "pairs_model": "ols",
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "pairs",
+    "tickers": [
+     "XOM",
+     "CVX"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "pairs-googl-goog",
+   "label": "Pairs: GOOGL / GOOG",
+   "backtest": {
+    "strategy": "pairs",
+    "tickers": [
+     "GOOGL",
+     "GOOG"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "pairs",
+    "tickers": [
+     "GOOGL",
+     "GOOG"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "pairs",
+     "tickers": [
+      "GOOGL",
+      "GOOG"
+     ],
+     "L": 60,
+     "z_entry": 2.0,
+     "z_exit": 0.5,
+     "hedge_mode": "fixed_at_entry",
+     "pairs_model": "ols",
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "pairs",
+    "tickers": [
+     "GOOGL",
+     "GOOG"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "pairs-nvda-amd",
+   "label": "Pairs: NVDA / AMD",
+   "backtest": {
+    "strategy": "pairs",
+    "tickers": [
+     "NVDA",
+     "AMD"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "pairs",
+    "tickers": [
+     "NVDA",
+     "AMD"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "pairs",
+     "tickers": [
+      "NVDA",
+      "AMD"
+     ],
+     "L": 60,
+     "z_entry": 2.0,
+     "z_exit": 0.5,
+     "hedge_mode": "fixed_at_entry",
+     "pairs_model": "ols",
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "pairs",
+    "tickers": [
+     "NVDA",
+     "AMD"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "hedge_mode": "fixed_at_entry",
+    "pairs_model": "ols",
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "mean-reversion-ko",
+   "label": "Mean reversion: KO",
+   "backtest": {
+    "strategy": "mean_reversion",
+    "tickers": [
+     "KO"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "mean_reversion",
+    "tickers": [
+     "KO"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "mean_reversion",
+     "tickers": [
+      "KO"
+     ],
+     "L": 60,
+     "z_entry": 2.0,
+     "z_exit": 0.5,
+     "allow_short": true,
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "mean_reversion",
+    "tickers": [
+     "KO"
+    ],
+    "L": 60,
+    "z_entry": 2.0,
+    "z_exit": 0.5,
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "trend-spy",
+   "label": "Trend: SPY",
+   "backtest": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "sensitivity": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill"
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "trend",
+     "tickers": [
+      "SPY"
+     ],
+     "L": 252,
+     "signal_frequency": "monthly",
+     "allow_short": true,
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill"
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "trend-spy-vol",
+   "label": "Trend: SPY, vol target 10%",
+   "backtest": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.1,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2
+   },
+   "sensitivity": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.1,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "trend",
+     "tickers": [
+      "SPY"
+     ],
+     "L": 252,
+     "signal_frequency": "monthly",
+     "allow_short": true,
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill",
+     "vol_target": 0.1,
+     "vol_halflife": 42,
+     "vol_refresh": "weekly",
+     "max_leverage": 2
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "trend",
+    "tickers": [
+     "SPY"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.1,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2,
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  },
+  {
+   "id": "trend-portfolio-etfs",
+   "label": "Trend portfolio: SPY, QQQ, GLD, TLT",
+   "backtest": {
+    "strategy": "trend_portfolio",
+    "tickers": [
+     "SPY",
+     "QQQ",
+     "GLD",
+     "TLT"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.4,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2
+   },
+   "sensitivity": {
+    "strategy": "trend_portfolio",
+    "tickers": [
+     "SPY",
+     "QQQ",
+     "GLD",
+     "TLT"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.4,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2
+   },
+   "monte_carlo": {
+    "source": "strategy",
+    "backtest": {
+     "strategy": "trend_portfolio",
+     "tickers": [
+      "SPY",
+      "QQQ",
+      "GLD",
+      "TLT"
+     ],
+     "L": 252,
+     "signal_frequency": "monthly",
+     "allow_short": true,
+     "start": "2015-01-01",
+     "end": "2025-12-31",
+     "cost_bps": 10,
+     "borrow_bps": 0,
+     "execution_lag": 1,
+     "risk_free": "tbill",
+     "vol_target": 0.4,
+     "vol_halflife": 42,
+     "vol_refresh": "weekly",
+     "max_leverage": 2
+    },
+    "n_paths": 10000,
+    "horizon": 252,
+    "block_len": 10,
+    "zero_drift": false,
+    "seed": 42
+   },
+   "walk_forward": {
+    "strategy": "trend_portfolio",
+    "tickers": [
+     "SPY",
+     "QQQ",
+     "GLD",
+     "TLT"
+    ],
+    "L": 252,
+    "signal_frequency": "monthly",
+    "allow_short": true,
+    "start": "2015-01-01",
+    "end": "2025-12-31",
+    "cost_bps": 10,
+    "borrow_bps": 0,
+    "execution_lag": 1,
+    "risk_free": "tbill",
+    "vol_target": 0.4,
+    "vol_halflife": 42,
+    "vol_refresh": "weekly",
+    "max_leverage": 2,
+    "train_days": 756,
+    "test_days": 63,
+    "anchored": false
+   }
+  }
+ ],
+ "responses": {
+  "backtest": {
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"KO\",\"PEP\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-ko-pep-backtest.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"XOM\",\"CVX\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-xom-cvx-backtest.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"GOOGL\",\"GOOG\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-googl-goog-backtest.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"NVDA\",\"AMD\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-nvda-amd-backtest.json",
+   "{\"L\":60,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"mean_reversion\",\"tickers\":[\"KO\"],\"z_entry\":2.0,\"z_exit\":0.5}": "mean-reversion-ko-backtest.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"]}": "trend-spy-backtest.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.1}": "trend-spy-vol-backtest.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend_portfolio\",\"tickers\":[\"SPY\",\"QQQ\",\"GLD\",\"TLT\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.4}": "trend-portfolio-etfs-backtest.json"
+  },
+  "sensitivity": {
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"KO\",\"PEP\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-ko-pep-sensitivity.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"XOM\",\"CVX\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-xom-cvx-sensitivity.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"GOOGL\",\"GOOG\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-googl-goog-sensitivity.json",
+   "{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"NVDA\",\"AMD\"],\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-nvda-amd-sensitivity.json",
+   "{\"L\":60,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"mean_reversion\",\"tickers\":[\"KO\"],\"z_entry\":2.0,\"z_exit\":0.5}": "mean-reversion-ko-sensitivity.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"]}": "trend-spy-sensitivity.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.1}": "trend-spy-vol-sensitivity.json",
+   "{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend_portfolio\",\"tickers\":[\"SPY\",\"QQQ\",\"GLD\",\"TLT\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.4}": "trend-portfolio-etfs-sensitivity.json"
+  },
+  "monte_carlo": {
+   "{\"backtest\":{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"KO\",\"PEP\"],\"z_entry\":2.0,\"z_exit\":0.5},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "pairs-ko-pep-monte-carlo.json",
+   "{\"backtest\":{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"XOM\",\"CVX\"],\"z_entry\":2.0,\"z_exit\":0.5},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "pairs-xom-cvx-monte-carlo.json",
+   "{\"backtest\":{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"GOOGL\",\"GOOG\"],\"z_entry\":2.0,\"z_exit\":0.5},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "pairs-googl-goog-monte-carlo.json",
+   "{\"backtest\":{\"L\":60,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"tickers\":[\"NVDA\",\"AMD\"],\"z_entry\":2.0,\"z_exit\":0.5},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "pairs-nvda-amd-monte-carlo.json",
+   "{\"backtest\":{\"L\":60,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"mean_reversion\",\"tickers\":[\"KO\"],\"z_entry\":2.0,\"z_exit\":0.5},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "mean-reversion-ko-monte-carlo.json",
+   "{\"backtest\":{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"]},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "trend-spy-monte-carlo.json",
+   "{\"backtest\":{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"tickers\":[\"SPY\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.1},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "trend-spy-vol-monte-carlo.json",
+   "{\"backtest\":{\"L\":252,\"allow_short\":true,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend_portfolio\",\"tickers\":[\"SPY\",\"QQQ\",\"GLD\",\"TLT\"],\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.4},\"block_len\":10,\"horizon\":252,\"n_paths\":10000,\"seed\":42,\"source\":\"strategy\",\"zero_drift\":false}": "trend-portfolio-etfs-monte-carlo.json"
+  },
+  "walk_forward": {
+   "{\"L\":60,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"test_days\":63,\"tickers\":[\"KO\",\"PEP\"],\"train_days\":756,\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-ko-pep-walk-forward.json",
+   "{\"L\":60,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"test_days\":63,\"tickers\":[\"XOM\",\"CVX\"],\"train_days\":756,\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-xom-cvx-walk-forward.json",
+   "{\"L\":60,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"test_days\":63,\"tickers\":[\"GOOGL\",\"GOOG\"],\"train_days\":756,\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-googl-goog-walk-forward.json",
+   "{\"L\":60,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"hedge_mode\":\"fixed_at_entry\",\"pairs_model\":\"ols\",\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"pairs\",\"test_days\":63,\"tickers\":[\"NVDA\",\"AMD\"],\"train_days\":756,\"z_entry\":2.0,\"z_exit\":0.5}": "pairs-nvda-amd-walk-forward.json",
+   "{\"L\":60,\"allow_short\":true,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"start\":\"2015-01-01\",\"strategy\":\"mean_reversion\",\"test_days\":63,\"tickers\":[\"KO\"],\"train_days\":756,\"z_entry\":2.0,\"z_exit\":0.5}": "mean-reversion-ko-walk-forward.json",
+   "{\"L\":252,\"allow_short\":true,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"test_days\":63,\"tickers\":[\"SPY\"],\"train_days\":756}": "trend-spy-walk-forward.json",
+   "{\"L\":252,\"allow_short\":true,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend\",\"test_days\":63,\"tickers\":[\"SPY\"],\"train_days\":756,\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.1}": "trend-spy-vol-walk-forward.json",
+   "{\"L\":252,\"allow_short\":true,\"anchored\":false,\"borrow_bps\":0,\"cost_bps\":10,\"end\":\"2025-12-31\",\"execution_lag\":1,\"max_leverage\":2,\"risk_free\":\"tbill\",\"signal_frequency\":\"monthly\",\"start\":\"2015-01-01\",\"strategy\":\"trend_portfolio\",\"test_days\":63,\"tickers\":[\"SPY\",\"QQQ\",\"GLD\",\"TLT\"],\"train_days\":756,\"vol_halflife\":42,\"vol_refresh\":\"weekly\",\"vol_target\":0.4}": "trend-portfolio-etfs-walk-forward.json"
+  }
+ }
+}

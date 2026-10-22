@@ -16,7 +16,9 @@ import numpy as np
 import pandas as pd
 
 from app.services.monte_carlo import ModelResult, MonteCarloResult
-from app.services.pipeline import BacktestReport, SensitivityResult
+from app.services.report import BacktestReport
+from app.services.sensitivity import SensitivityResult
+from app.services.walk_forward import WalkForwardResult
 
 
 def to_jsonable(obj: Any) -> Any:
@@ -41,21 +43,22 @@ def to_jsonable(obj: Any) -> Any:
     if isinstance(obj, (pd.Series, pd.Index)):
         return to_jsonable(obj.to_numpy())
     if isinstance(obj, np.ndarray):
+        # Whole arrays at once: the chart series are thousands of values each.
         if obj.dtype.kind == "M":
-            return [None if pd.isna(day) else day.strftime("%Y-%m-%d") for day in pd.DatetimeIndex(obj)]
+            return _with_nulls(np.datetime_as_string(obj, unit="D"), np.isnat(obj))
         if obj.dtype.kind == "f":
-            return _finite(obj.tolist())
+            return _with_nulls(obj, ~np.isfinite(obj))
         return to_jsonable(obj.tolist())
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {field.name: to_jsonable(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
     raise TypeError(f"cannot convert {type(obj).__name__} to JSON")
 
 
-def _finite(values: Any) -> Any:
-    """Float lists from ndarray.tolist(), with NaN and inf replaced by None (any nesting)."""
-    if isinstance(values, list):
-        return [_finite(value) for value in values]
-    return values if math.isfinite(values) else None
+def _with_nulls(values: np.ndarray, null: np.ndarray) -> list:
+    """values as (nested) Python lists, with None where null is True."""
+    out = values.astype(object)  # Python floats or str, as tolist() would give
+    out[null] = None
+    return out.tolist()
 
 
 def backtest_payload(
@@ -67,11 +70,20 @@ def backtest_payload(
     series = {
         "dates": s.index,
         **{name: s[name] for name in ("equity", "benchmark_equity", "drawdown", "daily_return")},
-        **{name: s[name] for name in ("position", "gross_exposure", "score")},
-        **{name: s[name] if name in s else None for name in ("beta", "beta_used", "vol_forecast")},
+        **{name: s[name] for name in ("position", "gross_exposure")},
+        **{name: s[name] if name in s else None for name in ("score", "beta", "beta_used", "vol_forecast")},
         "is_oos": s["is_oos"],
         "rolling_sharpe": s["rolling_sharpe"],
         "rolling_beta": s["rolling_beta"],
+        "legs": None
+        if report.legs is None
+        else [
+            {
+                "ticker": ticker,
+                **{name: leg[name] for name in ("score", "position", "weight", "vol_forecast")},
+            }
+            for ticker, leg in report.legs.items()
+        ],
     }
     diagnostics = None
     if d is not None:
@@ -121,7 +133,6 @@ def backtest_payload(
 
 def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
     """SensitivityResponse (§11.3). window.end is the split date, which the window excludes."""
-    selected = None if result.selected is None else {"L": result.selected[0], "z_entry": result.selected[1]}
     return to_jsonable(
         {
             "L_values": result.L_values,
@@ -129,8 +140,55 @@ def sensitivity_payload(result: SensitivityResult) -> dict[str, Any]:
             "sharpe": result.sharpe,
             "n_configs_tested": result.n_configs_tested,
             "window": {"start": result.window_start, "end": result.window_end},
-            "selected": selected,
+            "selected": _cell(result.selected),
             "deflated": result.deflated,
+        }
+    )
+
+
+def _cell(cell: tuple[int, float | None] | None) -> dict[str, Any] | None:
+    return None if cell is None else {"L": cell[0], "z_entry": cell[1]}
+
+
+def walk_forward_payload(
+    result: WalkForwardResult, resolved: dict[str, Any], data_warnings: list[str]
+) -> dict[str, Any]:
+    """WalkForwardResponse (§11.3). The stitched daily components stay server-side."""
+    s = result.series
+    return to_jsonable(
+        {
+            "resolved": {
+                **resolved,
+                "L_values": result.L_values,
+                "z_entry_values": result.z_entry_values,
+            },
+            "folds": [
+                {
+                    "train_start": f.train_start,
+                    "train_end": f.train_end,
+                    "test_start": f.test_start,
+                    "test_end": f.test_end,
+                    "selected": _cell(f.selected),
+                    "train_sharpe": f.train_sharpe,
+                    "test_sharpe": f.test_sharpe,
+                }
+                for f in result.folds
+            ],
+            "n_configs": result.n_configs,
+            "n_distinct_selected": result.n_distinct_selected,
+            "series": {
+                "dates": s.index,
+                "equity": s["equity"],
+                "fixed_equity": s["fixed_equity"],
+                "benchmark_equity": s["benchmark_equity"],
+                "fold": [None if np.isnan(j) else int(j) for j in s["fold"].to_numpy()],
+            },
+            "metrics": result.metrics,
+            "fixed_metrics": result.fixed_metrics,
+            "benchmark_metrics": result.benchmark_metrics,
+            "ruined": result.ruined,
+            "ruin_date": result.ruin_date,
+            "warnings": [*data_warnings, *result.warnings],
         }
     )
 
@@ -158,9 +216,11 @@ def monte_carlo_payload(result: MonteCarloResult, resolved: dict[str, Any]) -> d
                 "n_hist": result.n_hist,
                 "mu_daily": result.mu_daily,
                 "sigma_daily": result.sigma_daily,
+                "block_len_used": result.block_len_used,
             },
             "gbm": _model_payload(result.gbm),
             "bootstrap": _model_payload(result.bootstrap),
+            "stationary": _model_payload(result.stationary),
             "closed_form_gbm": result.closed_form_gbm,
             "hist_edges": result.hist_edges,
             "elapsed_ms_total": result.elapsed_ms_total,

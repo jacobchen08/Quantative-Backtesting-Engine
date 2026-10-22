@@ -2,7 +2,7 @@
 // grid on the diverging scale centred on 0, partial periods hatched, and each year's total.
 import { memo, useMemo } from 'react'
 import { fmtSignedPct } from '../format'
-import { calendarGrid, divergingColor, type CalendarCell } from '../transform'
+import { calendarGrid, divergingColor, type BenchmarkLabels, type CalendarCell } from '../transform'
 import type { CalendarReturns } from '../types'
 import { Panel } from './ui'
 
@@ -38,7 +38,7 @@ function YearCell(props: { value: number; partial: boolean; label: string; muted
 
 export const CalendarPanel = memo(function CalendarPanel(props: {
   calendar: CalendarReturns
-  benchmark: string
+  benchmark: BenchmarkLabels
   showBenchmark: boolean
 }) {
   const { years, bound } = useMemo(() => calendarGrid(props.calendar), [props.calendar])
@@ -59,7 +59,7 @@ export const CalendarPanel = memo(function CalendarPanel(props: {
             </div>
           ))}
           <div className="text-right text-neutral-400">Year</div>
-          {showBenchmark && <div className="text-right text-slate-400">B&amp;H {props.benchmark}</div>}
+          {showBenchmark && <div className="text-right text-slate-400">{props.benchmark.short}</div>}
           {years.map((y) => [
             <div key={`label-${y.year}`} className="flex items-center pr-2 text-neutral-400">
               {y.year}
@@ -74,7 +74,7 @@ export const CalendarPanel = memo(function CalendarPanel(props: {
                     key={`bench-${y.year}`}
                     value={y.benchmark}
                     partial={y.partial}
-                    label={`${y.year} buy & hold ${props.benchmark}`}
+                    label={`${y.year} ${props.benchmark.phrase}`}
                     muted
                   />,
                 ]
