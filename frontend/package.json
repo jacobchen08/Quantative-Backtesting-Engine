@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "preview:demo": "vite preview --mode demo",
     "e2e": "playwright test",
-    "screenshots": "node scripts/screenshots.ts"
+    "screenshots": "node scripts/screenshots.ts",
+    "demo-video": "node scripts/demo-video.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

@@ -106,10 +106,13 @@ quant-engine/
     playwright.config.ts     # Phase 8: the browser tests' servers (§12, "Browser tests")
     e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests"); demo.spec.ts (Phase 9)
     scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
+    scripts/demo-video.ts    # records docs/media/demo.webm against a live local API, and demo.gif from it
+    scripts/gif.ts           # the animated-GIF writer demo-video.ts uses
     public/demo/             # Phase 9: recorded responses for the static demo
   docs/METHODOLOGY.md        # §15
   docs/ARCHITECTURE.md       # a plain-language tour of the code for new readers
   docs/screenshots/          # dashboard screenshots (Phase 3 on)
+  docs/media/                # the README's demo video and its GIF preview
 ```
 - **Python:** 3.12 or later (developed on 3.14). List `tzdata` explicitly in the requirements: Windows has no system time-zone database, and `zoneinfo` needs one.
 - **PostgreSQL:** driver `psycopg[binary]`, URL form `postgresql+psycopg://…`. `docker-compose.yml` provides an optional Postgres 16.
