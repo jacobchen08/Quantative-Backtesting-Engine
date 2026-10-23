@@ -106,10 +106,13 @@ quant-engine/
     playwright.config.ts     # Phase 8: the browser tests' servers (§12, "Browser tests")
     e2e/                     # Phase 8: Playwright browser tests (§12, "Browser tests"); demo.spec.ts (Phase 9)
     scripts/screenshots.ts   # Phase 8: regenerates docs/screenshots against a live local API
+    scripts/demo-video.ts    # records docs/media/demo.webm against a live local API, and demo.gif from it
+    scripts/gif.ts           # the animated-GIF writer demo-video.ts uses
     public/demo/             # Phase 9: recorded responses for the static demo
   docs/METHODOLOGY.md        # §15
   docs/ARCHITECTURE.md       # a plain-language tour of the code for new readers
   docs/screenshots/          # dashboard screenshots (Phase 3 on)
+  docs/media/                # the README's demo video and its GIF preview
 ```
 - **Python:** 3.12 or later (developed on 3.14). List `tzdata` explicitly in the requirements: Windows has no system time-zone database, and `zoneinfo` needs one.
 - **PostgreSQL:** driver `psycopg[binary]`, URL form `postgresql+psycopg://…`. `docker-compose.yml` provides an optional Postgres 16.
@@ -890,7 +893,7 @@ The response reports the lengths actually used.
 | `z_entry` | float | 2.0 | 0 < z_entry ≤ 5; mean_reversion and pairs only |
 | `z_exit` | float | 0.5 | 0 ≤ z_exit < z_entry; mean_reversion and pairs only |
 | `signal_frequency` | `"monthly"` \| `"daily"` | `"monthly"` | trend and trend_portfolio only |
-| `cost_bps` | float | 10 | 0–100; one-way, per leg |
+| `cost_bps` | float | 2 | 0–100; one-way, per leg. It was 10 through Phase 9 (METHODOLOGY, Deviations, "After Phase 9") |
 | `execution_lag` | int | 1 | 0–5 |
 | `hedge_mode` | `"fixed_at_entry"` \| `"rolling"` | `"fixed_at_entry"` | pairs only |
 | `pairs_model` | `"ols"` \| `"kalman"` | `"ols"` | pairs only (Phase 7, §5.7) |

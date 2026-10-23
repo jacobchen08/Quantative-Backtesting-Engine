@@ -40,7 +40,7 @@ describe('defaults', () => {
     expect(f.strategy).toBe('pairs')
     expect([f.pairY, f.pairX]).toEqual(['KO', 'PEP'])
     expect(f.L).toBe('60')
-    expect([f.zEntry, f.zExit, f.costBps, f.lag]).toEqual(['2.0', '0.5', '10', '1'])
+    expect([f.zEntry, f.zExit, f.costBps, f.lag]).toEqual(['2.0', '0.5', '2', '1'])
     expect([f.borrowBps, f.longOnly]).toEqual(['0', false])
     expect(f.volOn).toBe(false)
     expect(f.mcSeed).toBe('')
@@ -100,7 +100,7 @@ describe('only the controls that apply are sent (§13)', () => {
       z_exit: 0.5,
       hedge_mode: 'fixed_at_entry',
       pairs_model: 'ols',
-      cost_bps: 10,
+      cost_bps: 2,
       borrow_bps: 0,
       execution_lag: 1,
       risk_free: 'tbill',
@@ -130,7 +130,7 @@ describe('only the controls that apply are sent (§13)', () => {
       end: TODAY,
       L: 252,
       signal_frequency: 'daily',
-      cost_bps: 10,
+      cost_bps: 2,
       borrow_bps: 0,
       allow_short: true,
       execution_lag: 1,

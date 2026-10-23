@@ -96,7 +96,7 @@ class BacktestRequest(BaseModel):
     z_entry: float = Field(2.0, gt=0, le=5)
     z_exit: float = Field(0.5, ge=0)
     signal_frequency: Literal["monthly", "daily"] = "monthly"
-    cost_bps: float = Field(10.0, ge=0, le=100, description="One-way cost per leg, basis points")
+    cost_bps: float = Field(2.0, ge=0, le=100, description="One-way cost per leg, basis points")
     execution_lag: int = Field(1, ge=0, le=5)
     hedge_mode: Literal["fixed_at_entry", "rolling"] = "fixed_at_entry"
     pairs_model: Literal["ols", "kalman"] = Field(

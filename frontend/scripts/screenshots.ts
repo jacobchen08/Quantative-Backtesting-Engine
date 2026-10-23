@@ -41,7 +41,8 @@ async function run(page: Page): Promise<number> {
   const header = page.locator('main p', { hasText: /run #\d+/ })
   const before = (await header.count()) > 0 ? await header.first().innerText() : null
   await page.getByRole('button', { name: 'Run', exact: true }).click()
-  await expect(header.first().or(page.locator('main [role=alert]').first())).toBeVisible({ timeout: RUN_TIMEOUT })
+  // .first() on the union too: a run whose grid fails shows both the header and an alert
+  await expect(header.first().or(page.locator('main [role=alert]').first()).first()).toBeVisible({ timeout: RUN_TIMEOUT })
   if (before !== null) await expect(header.first()).not.toHaveText(before, { timeout: RUN_TIMEOUT })
   await expect(page.locator('main .animate-pulse')).toHaveCount(0, { timeout: RUN_TIMEOUT })
   return Date.now() - started

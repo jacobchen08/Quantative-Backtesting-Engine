@@ -121,7 +121,7 @@ export function defaultForm(today: string): FormState {
     zExit: '0.5',
     signalFrequency: 'monthly',
     hedgeMode: 'fixed_at_entry',
-    costBps: '10',
+    costBps: '2',
     borrowBps: '0',
     longOnly: false,
     lag: '1',

@@ -30,6 +30,9 @@ export const CostSweepPanel = memo(function CostSweepPanel(props: { backtest: Ba
     body = <Muted>No {SEGMENT_NAME[segment]} segment in this run.</Muted>
   } else {
     const { breakEven } = view
+    // A label sits left of its line, or right of it near the y-axis, where it would be cut off.
+    const side = (x: number, edge: 'Top' | 'Bottom'): `inside${typeof edge}${'Left' | 'Right'}` =>
+      x < view.domainMax / 4 ? `inside${edge}Left` : `inside${edge}Right`
     body = (
       <>
         <LineChart responsive width="100%" height={220} data={view.rows} margin={CHART_MARGIN}>
@@ -51,14 +54,14 @@ export const CostSweepPanel = memo(function CostSweepPanel(props: { backtest: Ba
             x={own}
             stroke={COLORS.split}
             strokeDasharray="4 3"
-            label={{ value: `this run ${fmtBps(own)}`, position: 'insideBottomRight', fill: COLORS.tick, fontSize: 10 }}
+            label={{ value: `this run ${fmtBps(own)}`, position: side(own, 'Bottom'), fill: COLORS.tick, fontSize: 10 }}
           />
           {breakEven !== null && !view.offChart && (
             <ReferenceLine
               x={breakEven}
               stroke={COLORS.var}
               strokeDasharray="4 3"
-              label={{ value: `break-even ${fmtBps(breakEven)}`, position: 'insideTopRight', fill: COLORS.var, fontSize: 10 }}
+              label={{ value: `break-even ${fmtBps(breakEven)}`, position: side(breakEven, 'Top'), fill: COLORS.var, fontSize: 10 }}
             />
           )}
           <Line

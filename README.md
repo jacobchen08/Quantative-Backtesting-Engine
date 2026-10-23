@@ -1,5 +1,33 @@
 # Quantitative Backtesting Engine
 
+[![A 98-second tour of the dashboard: a KO/PEP pairs backtest, every panel, a walk-forward and a ten-ETF trend portfolio](docs/media/demo.gif)](docs/media/demo.webm)
+
+*A 98-second tour: a KO/PEP pairs backtest, the scorecard on each period, every panel, a walk-forward, the three Monte Carlo models, then a trend portfolio of ten ETFs. The animation is cut down to 800 px and 6 frames a second; click it for the full 1440 × 900 recording ([docs/media/demo.webm](docs/media/demo.webm)).*
+
+## Screenshots
+
+![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
+
+*KO/PEP pairs, 2015-01-02 to 2025-12-31, default settings.*
+
+| | |
+|---|---|
+| ![KPI grid](docs/screenshots/kpi-grid.png) KPI grid with the IS / OOS / Full toggle, costs and the break-even cost | ![Equity and drawdown](docs/screenshots/equity-drawdown.png) Equity and drawdown, with the OOS segment shaded |
+| ![Rolling statistics](docs/screenshots/rolling-statistics.png) Rolling one-year Sharpe and beta to SPY | ![Calendar returns](docs/screenshots/calendar-returns.png) Monthly and annual returns, with partial periods hatched |
+| ![Signal panel](docs/screenshots/signal-panel.png) Signal panel: z-score with thresholds and trade markers, hedge ratio, gross exposure | ![Trades table](docs/screenshots/trades-table.png) Trades table |
+| ![Cost sweep](docs/screenshots/cost-sweep.png) Sharpe against one-way cost, with the break-even cost | ![Sensitivity heatmap](docs/screenshots/sensitivity-heatmap.png) In-sample sensitivity grid and its deflated Sharpe ratios |
+| ![Walk-forward](docs/screenshots/walk-forward.png) Walk-forward: the test windows stitched together against L 60 / z 2.0 held fixed, the metrics and the fold table | ![Monte Carlo](docs/screenshots/monte-carlo.png) Monte Carlo fan chart, histogram and risk table |
+| ![Kalman signal panel](docs/screenshots/signal-panel-kalman.png) KO/PEP with the Kalman model: the innovation z-score and the filtered hedge ratio | ![Trend-portfolio signal panel](docs/screenshots/signal-panel-trend-portfolio.png) Trend portfolio of 10 ETFs: each leg's score and trades, the executed weights, gross exposure and each leg's vol forecast |
+| ![Trend-portfolio KPI grid](docs/screenshots/kpi-grid-trend-portfolio.png) The trend portfolio's KPI grid against its equal-weight basket, with the per-asset target and the legs' days at their cap | ![Stationary bootstrap](docs/screenshots/monte-carlo-stationary.png) Monte Carlo of the trend portfolio with automatic block lengths, showing the stationary bootstrap |
+| ![Log-scale equity](docs/screenshots/equity-drawdown-log.png) SPY trend with a 10% volatility target, 2006–2025, on the log scale | ![Run history](docs/screenshots/run-history.png) Run history, comparing four stored runs on the full window |
+| ![Unknown ticker](docs/screenshots/error-unknown-ticker.png) An unknown ticker (404) | ![Grid needs more history](docs/screenshots/error-sensitivity-grid.png) A trend history too short for the grid (422) |
+
+Full-page captures: [KO/PEP pairs](docs/screenshots/dashboard-pairs-full.png), [SPY trend, 2006–2025, with a 10% volatility target](docs/screenshots/dashboard-trend-voltarget-full.png), and [the diversified trend portfolio of 10 ETFs, 2015–2025](docs/screenshots/dashboard-trend-portfolio-full.png).
+
+The video and screenshots were made on 2026-10-22 from the dashboard running against the local API on Yahoo data, with the default settings unless a caption says otherwise. With the API on 8000 and `npm run dev` on 5173, `npm run screenshots` (`frontend\scripts\screenshots.ts`) regenerates every file in `docs\screenshots`, and `npm run demo-video` (`frontend\scripts\demo-video.ts`) records `docs\media\demo.webm` and makes `demo.gif` from it; both download any data the cache lacks. The KO/PEP views show the in-sample segment, because that's where the cost sweep has a break-even line. In the walk-forward view I hid the buy & hold line with its toggle, so the axis fits the two pairs strategies.
+
+## About
+
 I built this to test daily trading strategies on US stocks and ETFs the way I'd want someone else's results tested: with realistic costs, a clean split between the data a strategy was tuned on and the data that judges it, and a few tools that try to talk you out of a good-looking result. A FastAPI backend does the math and a React dashboard shows it.
 
 There are four strategies: mean reversion on a single stock, pairs trading (with either a rolling regression or a Kalman filter for the hedge ratio), trend following on one asset, and a trend portfolio of 2 to 12 ETFs, each sized to the same volatility. Any of them can be sized to a volatility target, and all but pairs can be run long-only. The accounting is deliberately conservative: trades fill a day after the signal by default, every leg pays a trading cost, shorts can pay a borrow fee, and idle cash earns the T-bill rate. Results are reported in-sample and out-of-sample.
@@ -18,10 +46,6 @@ The dashboard also keeps a history of past runs you can compare side by side, pu
 **Where to read more.** If you're new to the code, start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): it follows a request from the Run button through the engine and back, and explains the vocabulary. [CLAUDE.md](CLAUDE.md) is the specification the code is built against; every formula and rule is defined there, and the § numbers in code comments point into it. [docs/METHODOLOGY.md](docs/METHODOLOGY.md) explains why each formula is the way it is, lists the model's limitations, and records every place the code departs from the spec.
 
 All nine planned phases are finished, including the [static demo](#static-demo), which is built and tested but not deployed yet.
-
-![The dashboard on a KO/PEP pairs backtest](docs/screenshots/dashboard-pairs.png)
-
-*KO/PEP pairs, 2015-01-02 to 2025-12-31, default settings. More views [below](#screenshots).*
 
 ## Setup (PowerShell)
 
@@ -60,7 +84,7 @@ The demo is a read-only build of the dashboard for GitHub Pages. It replays reco
 
 It isn't deployed yet. The recorded series are derived from Yahoo Finance data, and I haven't decided whether redistributing them is acceptable (CLAUDE.md §13). Until then `.github/workflows/pages.yml` builds the demo on every push to `main` but skips the deploy. Once it's live it will be at https://jacobchen08.github.io/Quantitative-Backtesting-Engine/.
 
-The current recording in `frontend\public\demo` was made on 2026-10-20 from data through 2025-12-31. It is 33 files and 8.65 MB, under the 10 MB limit.
+The current recording in `frontend\public\demo` was made on 2026-10-22 from data through 2025-12-31, at the 2 bps default cost. It is 33 files and 8.64 MB, under the 10 MB limit.
 
 ```powershell
 # Re-record. Downloads any prices missing from backend\quant.db first; adds nothing to the run history.
@@ -115,7 +139,7 @@ These tables are copied from its output on 2026-10-21, after the second refactor
 - CPU: AMD Ryzen 7 PRO 8840HS w/ Radeon 780M Graphics, 16 logical cores; RAM: 59.7 GiB
 - OS: Windows-11-10.0.26220-SP0; Python 3.14.6 (CPython)
 - Libraries: numpy 2.5.4, pandas 3.0.6, scipy 1.18.1, statsmodels 0.15.0, arch 8.0.0, fastapi 0.143.2, starlette 1.8.0, pydantic 2.14.1, SQLAlchemy 2.1.4
-- Data: KO/PEP pairs, every other setting default, 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db (no downloads)
+- Data: KO/PEP pairs, every other setting default (the cost was then 10 bps; it's now 2, which doesn't change the work done), 2011-01-01 to 2025-12-31: 3,772 trading days, from bench.db (no downloads)
 - Each row: 10 timed runs after one warm-up run, wall clock (time.perf_counter)
 
 **CLAUDE.md §14 targets**
@@ -220,21 +244,3 @@ Timings on this machine vary by up to 2x over an evening, so only compare figure
 The stationary bootstrap is the slowest Monte Carlo model, at 138 ms against 60 ms for the block bootstrap, because it draws a restart flag and a starting point for every day of every path (METHODOLOGY §29). Its random draws determine the seeded results, so I left it as it is. Memory hasn't changed at 216 MB: the peak comes from the block bootstrap, and the stationary bootstrap builds its paths in chunks of 2,048.
 
 The sensitivity grid and the walk-forward are well inside their targets, at 221 ms against 5 s and 232 ms against 8 s.
-
-## Screenshots
-
-All of these were taken on 2026-10-19 from the dashboard running against the local API on Yahoo data, by `npm run screenshots` (`frontend\scripts\screenshots.ts`). With the API on 8000 and `npm run dev` on 5173, that script regenerates every file in `docs\screenshots`, downloading any data the cache lacks. The KO/PEP views show the in-sample segment, because that's where the cost sweep has a break-even line. In the walk-forward view I hid the buy & hold line with its toggle, so the axis fits the two pairs strategies.
-
-| | |
-|---|---|
-| ![KPI grid](docs/screenshots/kpi-grid.png) KPI grid with the IS / OOS / Full toggle, costs and the break-even cost | ![Equity and drawdown](docs/screenshots/equity-drawdown.png) Equity and drawdown, with the OOS segment shaded |
-| ![Rolling statistics](docs/screenshots/rolling-statistics.png) Rolling one-year Sharpe and beta to SPY | ![Calendar returns](docs/screenshots/calendar-returns.png) Monthly and annual returns, with partial periods hatched |
-| ![Signal panel](docs/screenshots/signal-panel.png) Signal panel: z-score with thresholds and trade markers, hedge ratio, gross exposure | ![Trades table](docs/screenshots/trades-table.png) Trades table |
-| ![Cost sweep](docs/screenshots/cost-sweep.png) Sharpe against one-way cost, with the break-even cost | ![Sensitivity heatmap](docs/screenshots/sensitivity-heatmap.png) In-sample sensitivity grid and its deflated Sharpe ratios |
-| ![Walk-forward](docs/screenshots/walk-forward.png) Walk-forward: the test windows stitched together against L 60 / z 2.0 held fixed, the metrics and the fold table | ![Monte Carlo](docs/screenshots/monte-carlo.png) Monte Carlo fan chart, histogram and risk table |
-| ![Kalman signal panel](docs/screenshots/signal-panel-kalman.png) KO/PEP with the Kalman model: the innovation z-score and the filtered hedge ratio | ![Trend-portfolio signal panel](docs/screenshots/signal-panel-trend-portfolio.png) Trend portfolio of 10 ETFs: each leg's score and trades, the executed weights, gross exposure and each leg's vol forecast |
-| ![Trend-portfolio KPI grid](docs/screenshots/kpi-grid-trend-portfolio.png) The trend portfolio's KPI grid against its equal-weight basket, with the per-asset target and the legs' days at their cap | ![Stationary bootstrap](docs/screenshots/monte-carlo-stationary.png) Monte Carlo of the trend portfolio with automatic block lengths, showing the stationary bootstrap |
-| ![Log-scale equity](docs/screenshots/equity-drawdown-log.png) SPY trend with a 10% volatility target, 2006–2025, on the log scale | ![Run history](docs/screenshots/run-history.png) Run history, comparing four stored runs on the full window |
-| ![Unknown ticker](docs/screenshots/error-unknown-ticker.png) An unknown ticker (404) | ![Grid needs more history](docs/screenshots/error-sensitivity-grid.png) A trend history too short for the grid (422) |
-
-Full-page captures: [KO/PEP pairs](docs/screenshots/dashboard-pairs-full.png), [SPY trend, 2006–2025, with a 10% volatility target](docs/screenshots/dashboard-trend-voltarget-full.png), and [the diversified trend portfolio of 10 ETFs, 2015–2025](docs/screenshots/dashboard-trend-portfolio-full.png).
